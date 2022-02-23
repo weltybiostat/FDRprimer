@@ -1,0 +1,3626 @@
+---
+title: "A Statistical Primer on False Discovery Quantities"
+subtitle: "Code & Illustrations"
+author: "Valerie Welty"
+date: '`r paste0("Updated: ", Sys.Date())`'
+output: 
+  bookdown::html_document2:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+
+# Custom functions & settings
+
+```{r opts}
+save_figs = FALSE
+add_leg = FALSE
+
+project.folder = "/Users/valeriewelty/Dropbox/Vandy/Research/Paper/fdr/Code/FDR_GitHub_vfw"
+# project.folder = " "
+
+```
+
+```{r snp opts, cache=TRUE}
+run_snp_ex = TRUE
+snp_size = 'all'
+```
+
+```{r General functions, results='hide'}
+
+library(knitr)
+
+# ..................................................................... #
+######### General Functions ######################
+# ..................................................................... #
+
+# Simple Automatic Named List Creation
+# (Solution from: https://stackoverflow.com/questions/21011672/automatically-add-variable-names-to-elements-of-a-list)
+listNamed <- function(...){
+  anonList <- list(...)
+  names(anonList) <- as.character(substitute(list(...)))[-1]
+  anonList
+}
+
+```
+
+```{r Code functions, results='hide'}
+
+# ..................................................................... #
+######### Code Functions ######################
+# ..................................................................... #
+
+# Generate  data table 
+GenDataTable = function(p, truth=NULL, m, pi0=NULL, level=0.05, method=c('unadjusted','bonferroni','bh')) {
+  
+  if(is.null(truth)) {
+    
+    m0 = NA
+    m1 = NA
+    
+    if(method == 'unadjusted') {
+      reject = p<=level
+    } else if(method=='bonferroni') {
+      reject = p<=level/m
+    } else if(method=='bh') {
+      p = p[order(p)]
+      thresh_bh = (1:length(p))/length(p)*level
+      i_max = max(which(p<=thresh_bh))
+      reject = p<=p[i_max]
+    }
+    
+    R = sum(reject)
+    I = sum(!reject)
+    
+    V = NA
+    U = NA
+    
+    Q = NA  # False Discovery Proportion
+    QN = NA  # False Negative Proportion
+    
+    m0V = NA
+    m1U = NA
+    
+    
+  } else {
+  
+  
+    m0 = m*pi0
+    m1 = m - m0
+    
+    if(method == 'unadjusted') {
+      reject = p<=level
+    } else if(method=='bonferroni') {
+      reject = p<=level/m
+    } else if(method=='bh') {
+      truth = truth[order(p)]
+      p = p[order(p)]
+      thresh_bh = (1:length(p))/length(p)*level
+      i_max = max(which(p<=thresh_bh))
+      reject = p<=p[i_max]
+    }
+    
+    R = sum(reject)
+    I = sum(!reject)
+    
+    V = sum(reject*!truth)
+    U = sum(reject*truth)
+    
+    Q = ifelse(R>0,V/R,0)  # False Discovery Proportion
+    QN = ifelse((m-R)>0,(m-m0-U)/(m-R),0)  # False Negative Proportion
+    
+    m0V = m0 - V
+    m1U = m1 - U
+    
+    if(!all(c(V+U==R, m0V+m1U==I, V+m0V==m0, U+m1U==m1))) {
+      return('error')
+    }
+    
+  }
+  
+  return(c('m'=m,'m0'=m0,'m1'=m1,'R'=R,'I'=I,'V'=V,'U'=U,'m0V'=m0V,'m1U'=m1U,'Q'=Q,'QN'=QN))
+  
+}
+
+
+# Print data table, formatted
+PrintDataTable = function(results=NULL,m,m0,V,U,R,Q,QN,title=" ",table=TRUE) {
+  #### use `results` list OR use `m`,`m0`,`V`,`U`, and `R` arguments. If both are entered, `results` will take precedence
+  
+  if(!is.null(results)) {
+    m=results[['m']]
+    m0=results[['m0']]
+    V=results[['V']]
+    U=results[['U']]
+    R=results[['R']]
+    Q=results[['Q']]
+    QN=results[['QN']]
+  }
+  
+  if(table==TRUE) {
+    
+    cat(paste("\n ",title,": \n",sep=""),
+        paste("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"),
+        paste("       ", " | ", " True ", " | "," False ", " | ", "Total \n",sep="\t"),
+        paste("----------------------------------------------------------------\n"),
+        paste("Reject      ", " | ", sprintf("%.0f", V),
+              " | ", sprintf("%.0f", U), 
+              " | ", sprintf("%.0f", R), "\n",sep="\t"),							
+        paste("Inconclusive", " | ", sprintf("%.0f", m0-V), 
+              " | ", sprintf("%.0f", (m-m0)-U), 
+              " | ", sprintf("%.0f", m-R), "\n",sep="\t"),
+        paste("----------------------------------------------------------------\n"),
+        paste("Total       ", " | ", sprintf("%.0f", m0), 
+              " | ", sprintf("%.0f", m-m0), 
+              " | ", sprintf("%.0f", m), "\n",sep="\t"),
+        paste("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"),
+        paste(sprintf("FDP: %.0f/%.0f = %.2f", V, R, Q), "\n"),
+        paste(sprintf("FNP: %.0f/%.0f = %.2f", m-m0-U, m-R, QN))
+    )
+  } else {
+    
+    sprintf("pi0 = %.2f, R = %.0f, V = %.0f, FDP = %.2f, FNP = %.2f", m0/m, V, R, Q, QN)
+    
+  }
+  
+}
+
+library(distr)
+library(BiasedUrn)
+
+# Calculate FWER, FDR, pFDR, mFDR
+Calc_FDQ_quants = function(a, b, m, pi0=NULL, m0=NULL, m1=NULL) {
+  
+  if(is.null(m0)) {
+    m0 = m*pi0
+    m1 = m-m0
+  }
+  
+  ## Pr(R=r) - convolution of 2 indep binom; get pdf via 'distr' package
+  # library(distr)
+  V = Binom(size=m0, prob=a)
+  U = Binom(size=m1, prob=1-b)
+  f.R = d(convpow(V+U,1))
+  
+  pr.Rr = f.R(1:m)
+    # plot(1:m, pr.Rr, type='l')
+
+  ## Pr(R=0)
+  pr.r0 = f.R(0)
+  # -Manual
+  # pr.r0 = (1-a)^m0*b^m1
+  
+ 
+  ## Pr(V=v|R=r) - Fisher's noncentral hypergeometric distribution; get pdf via 'BiasedUrn' package
+  # library(BiasedUrn) # dFNCHypergeo(x=v, m1=m0, m2=m1, n=r, odds=a/(1-a)/((1-b)/b))
+  pr.V0.condit.r = sapply(1:m, function(r) dFNCHypergeo(x=0, m1=m0, m2=m1, n=r, odds=a/(1-a)/((1-b)/b)) )
+
+
+  ## FWER = Pr(Q>0) = 1 - Pr(R=0) - sum_{r=1:m}[Pr(V=0|R=r)*Pr(R=r)]
+  FWER = 1 - pr.r0 - sum(sapply(1:m, function(r) pr.V0.condit.r[r]*pr.Rr[r]))
+  
+  
+  ### Calc mFDR
+  mFDR = (pi0*a)/(pi0*a+(1-pi0)*(1-b))
+  
+  ### Calc FDR
+  E.V.condit.r = sapply(1:m, function(r) meanFNCHypergeo(m1=m0, m2=m1, n=r, odds=a/(1-a)/((1-b)/b)))
+  
+  FDR = sum(sapply(1:m, function(r) 1/r*E.V.condit.r[r]*pr.Rr[r]))
+  
+  pFDR = FDR/(1-pr.r0)
+  
+  return(c("FWER"=FWER,"FDR"=FDR, "pFDR"=pFDR, "mFDR"=mFDR))
+  
+}
+
+
+qval_fun = function(z, pFDR, type=c('2s', '1su', '1sl')) {
+  
+  if(type=='2s') {
+    qval=sapply(1:length(z), function(i)  min(pFDR[which(z <= abs(z[i]) & z >= -abs(z[i]))]) )
+  } else if(type=='1su') {
+    qval=sapply(1:length(z), function(i)  min(pFDR[which(z <= z[i])]) )
+  } else if(type=='1sl') {
+    qval=sapply(1:length(z), function(i)  min(pFDR[which(z >= z[i])]) )
+  }
+  
+  return(qval)
+  
+}
+
+
+loc_nonpar_appr = function(z, K, m, pi0=1, plot=F) {
+  
+  round(seq(min(z)-0.01, max(z)+0.01, length=K),2)
+  
+  h = hist(z, breaks=seq(min(z)-0.01, max(z)+0.01, length=K), plot=plot)
+  delta = mean(sapply(2:length(h$breaks), function(i) h$breaks[i]-h$breaks[i-1]))/2
+  
+  
+  xk = h$mids
+  breaks = h$breaks
+  
+  get_bin = function(zi, breaks) {
+    bin = rep(NA, length(zi))
+    for(j in 1:length(zi)) {
+      for(i in 1:(length(breaks)-1)) {
+        if(zi[j] >= breaks[i] & zi[j] < breaks[i+1]) {
+          bin[j] = i
+        }
+      }
+    }
+    return(bin)
+  }
+  
+  z_bin = get_bin(zi=z, breaks=h$breaks)
+  
+  loc_fdr = rep(NA, length(z))
+  for(i in 1:length(z)) {
+    loc_fdr[i] = m*pi0*(pnorm(xk[z_bin[i]]+delta) - pnorm(xk[z_bin[i]]-delta))/(sum(z_bin==z_bin[i]))
+  }
+  return(list('K'=K, 'delta'=delta, 'loc_fdr'=loc_fdr))
+}
+
+
+# ..................................................................... #
+
+
+```
+
+# Simulation and Example Data
+
+Simulated data functions:
+
+```{r Simulated data functions}
+
+# ..................................................................... #
+######### Simulated Data Functions ######################
+# ..................................................................... #
+
+# Generate simple simulation data
+Gen_Data = function(m=1000, pi0=0.85, pi1a=0.15, pi1b=0, theta=3) {
+  
+  n0 = m*pi0
+  n1a = m*pi1a
+  n1b = m*pi1b
+  
+  tsim0 = sort(rnorm(n0))
+  tsim1a = sort(rnorm(n1a,theta,1))
+  tsim1b = sort(rnorm(n1b,-theta,1))
+  
+  truth = c(rep(0,m*pi0),rep(1,m*(pi1a+pi1b)))
+  tsim = c(tsim0, tsim1a, tsim1b)
+
+  ## order by statistic
+  idx = rev(order(tsim))
+  truth = truth[idx]
+  tsim = tsim[idx]
+
+  dat = data.frame(i=1:m, truth, tsim)
+  
+  return(dat)
+  
+}
+
+Gen_Data_4gr_underdisp = function(m=10000, pi0=0.9, delta0=0, sigma0=0.9, delta1=c(0.3, 1, 3), sigma1=0.9, seed.no=NULL, print.time=TRUE) {
+  
+  if(is.null(seed.no)) {
+    set.seed(round(runif(n=1, min=1, max=100000)))
+  } else {
+    set.seed(seed.no)
+  }
+  
+  
+  t0 = Sys.time()
+ 
+  n0 = ceiling(m*pi0)
+  n1 = m - n0
+  
+  n1a = floor(n1/3)
+  n1b = floor((n1 - n1a)/2)
+  n1c = n1 - n1a - n1b
+  
+  Theta = c(rep(delta0, n0), rep(delta1[1], n1a), rep(delta1[2], n1b), rep(delta1[3], n1c))
+  
+  ### sim, reduce sd (<1) to capture correlation
+  Sigma = c(rep(sigma0, n0), rep(sigma1, n1))
+  zsim = rnorm(n = m, mean = Theta, sd = Sigma)
+  
+  # hist(zsim, breaks=100)
+  
+  
+  truth = c(rep(0, n0), rep(1, n1))
+  dat = data.frame(i=1:m, truth, eff = Theta, z = zsim)
+  
+  
+  t1 = Sys.time()
+  difference = difftime(t1, t0, units='mins')
+  if(print.time==TRUE) {
+    message(paste(round(difference, 3), "minutes"))
+  }
+  
+  
+  return(dat)
+  
+}
+
+```
+
+Organize data:
+
+```{r Organize data - sim}
+
+####### --> Simple Simulation Data #### 
+
+set.seed(17)  
+  ## seed & theta value chosen such that we could provide a clear illustration of when pFDR are different from q-values
+m=1000
+pi0=0.85
+pi1a=0.15
+pi1b=0
+theta=2.4
+
+dat_sim = Gen_Data(m=m, pi0=pi0, pi1a=pi1a, pi1b=pi1b, theta=theta) 
+dat_sim$eff = ifelse(dat_sim$truth==1, theta, 0)
+
+dat_sim$z = dat_sim$tsim
+dat_sim$p_1su = 1-pnorm(dat_sim$z)
+dat_sim$p_1sl = pnorm(dat_sim$z)
+dat_sim$p_2s = pnorm(-abs(dat_sim$z)) + (1 - pnorm(abs(dat_sim$z)))
+m_sim = nrow(dat_sim)
+
+dat_sim$p = dat_sim$p_1su
+
+## Calculate Bonferroni adjusted p-values
+dat_sim$bonf_adj = pmin(dat_sim$p*m_sim, 1)
+# reject = as.numeric(dat_sim$bonf_adj <= 0.05)
+
+## Calculate BH false discovery rate estimates
+dat_sim = dat_sim[order(dat_sim$p),]
+dat_sim$BH_Fdr = dat_sim$p/((1:m_sim)/m_sim)
+
+## Calculate BH adjusted p-values
+dat_sim$BH_adj = p.adjust(dat_sim$p, method = 'BH')
+
+# hist(dat_sim$BH_Fdr - dat_sim$BH_adj)
+
+
+z_sim = dat_sim$z   # assume values are already z
+truth_sim = dat_sim$truth
+  ## -> truth = 0 [Null], truth = 1 [Non-null]
+pi0_sim = sum(truth_sim==0)/m_sim
+
+## sorted vector of z-values
+idx = order(z_sim)
+z_sim = z_sim[idx]
+truth_sim = truth_sim[idx]
+
+```
+
+```{r Organize data - undspsim}
+
+####### --> Underdispersed 4-Group Simulation Data ####
+
+## Simulation from narrowed normal distribution & mixture of 3 alternative effect sizes
+
+dat_undspsim = Gen_Data_4gr_underdisp(m=50000, pi0=0.9, delta0=0, sigma0=0.9, delta1=c(0.3, 1, 3), sigma1=0.9, seed.no=4202824, print.time=FALSE) # 
+
+
+m_undspsim = nrow(dat_undspsim)
+pi0_undspsim = round(mean(1 - dat_undspsim[,"truth"]), 2)
+
+
+pi1_undspsim = 1 - pi0_undspsim
+m0_undspsim = sum(dat_undspsim[,"truth"] == 0)
+m1_undspsim = sum(dat_undspsim[,"truth"] == 1)
+
+
+dat_undspsim$z = dat_undspsim$z
+z_undspsim = dat_undspsim$z   # assume values are already z
+truth_undspsim = dat_undspsim$truth
+## -> truth = 0 [Null], truth = 1 [Non-null]
+
+dat_undspsim$p_1su = 1-pnorm(dat_undspsim$z)
+dat_undspsim$p_1sl = pnorm(dat_undspsim$z)
+dat_undspsim$p_2s = pnorm(-abs(dat_undspsim$z)) + (1 - pnorm(abs(dat_undspsim$z)))
+
+
+dat_undspsim$p = dat_undspsim$p_1su
+
+## Calculate Bonferroni adjusted p-values
+dat_undspsim$bonf_adj = pmin(dat_undspsim$p*m_undspsim, 1)
+# reject = as.numeric(dat_undspsim$bonf_adj <= 0.05)
+
+## Calculate BH false discovery rate estimates
+dat_undspsim = dat_undspsim[order(dat_undspsim$p),]
+dat_undspsim$BH_Fdr = dat_undspsim$p/((1:m_undspsim)/m_undspsim)
+
+## Calculate BH adjusted p-values
+dat_undspsim$BH_adj = p.adjust(dat_undspsim$p, method = 'BH')
+
+# hist(dat_undspsim$BH_Fdr - dat_undspsim$BH_adj)
+
+
+## sorted vector of z-values
+idx = order(z_undspsim)
+z_undspsim = z_undspsim[idx]
+truth_undspsim = truth_undspsim[idx]
+
+```
+
+```{r Organize data - snp}
+if(run_snp_ex==TRUE) {
+  
+####### --> Prostate Cancer SNP Data ####
+load(file.path(project.folder, "Data/prostate_snp_deident.Rdata"))  
+dat_snp = pros_snp
+  
+dat_snp$z = dat_snp$zstat
+dat_snp$p_1su = 1-pnorm(dat_snp$z)
+dat_snp$p_1sl = pnorm(dat_snp$z)
+dat_snp$p_2s = pnorm(-abs(dat_snp$z)) + (1 - pnorm(abs(dat_snp$z)))
+m_snp = nrow(dat_snp)
+
+dat_snp$p = dat_snp$p_1su
+
+## Calculate Bonferroni adjusted p-values
+dat_snp$bonf_adj = pmin(dat_snp$p*m_snp, 1)
+# reject = as.numeric(dat_snp$bonf_adj <= 0.05)
+
+## Calculate BH false discovery rate estimates
+dat_snp = dat_snp[order(dat_snp$p),]
+dat_snp$BH_Fdr = dat_snp$p/((1:m_snp)/m_snp)
+
+## Calculate BH adjusted p-values
+dat_snp$BH_adj = p.adjust(dat_snp$p, method = 'BH')
+
+# hist(dat_snp$BH_Fdr - dat_snp$BH_adj)
+
+
+z_snp = dat_snp$z
+m_snp = length(z_snp)
+
+## sorted vector of z-values
+idx = order(z_snp)
+z_snp = z_snp[idx]
+
+
+}
+```
+
+Figure 1: Distribution of p-values and z-values
+
+Simple simulation:
+
+```{r Figure 1 Sim, fig.width=8, fig.height=4.5}
+
+### Figure 1: Distribution of p-values and z-values
+
+# Sim
+dat = dat_sim; m = m_sim
+dat$p = dat$p_1su
+
+if(save_figs == TRUE) {
+  png(filename=file.path(project.folder,"Figures/Fig1_sim.png"), width=500, height=300, units='mm', res=250)
+  mult = 2
+} else {mult = 1}
+
+par(mfrow=c(1,2), cex=1.3*mult)
+## Histogram of p-values with  theoretical null pi0=1 line
+h = hist(dat$p, breaks=100, plot=F)
+d = h$breaks[2] - h$breaks[1]
+pseq = seq(0, 1, by=0.05)
+
+plot(h, xlab='p', main='')
+lines(pseq, m*d*1*dunif(pseq), col='red', lwd=3)
+
+
+### Histogram of z-values with theoretial null pi0=1 line
+h = hist(dat$z, breaks=100, plot=F)
+d = h$breaks[2] - h$breaks[1]
+zseq = seq(-6, 15, by=0.1)
+
+plot(h, xlab='z', main=''
+     , ylim=c(0,40)   # sim
+     )
+lines(zseq, m*d*1*dnorm(zseq), col='red', lwd=3)
+
+title("Simple Simulation", line = -2, outer = TRUE)
+par(mfrow=c(1,1), cex=1)
+
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+Underdispersed simulation:
+
+```{r Figure 1 Undspsim, fig.width=8, fig.height=4.5}
+
+### Figure 1: Distribution of p-values and z-values
+
+# Undspsim
+dat = dat_undspsim; m = m_undspsim
+dat$p = dat$p_1su
+
+if(save_figs == TRUE) {
+  png(filename=file.path(project.folder,"Figures/Fig1_undspsim.png"), width=500, height=300, units='mm', res=250)
+  mult = 1.92
+} else {mult = 1}
+
+par(mfrow=c(1,2), cex=1.3*mult)
+## Histogram of p-values with  theoretical null pi0=1 line
+h = hist(dat$p, breaks=100, plot=F)
+d = h$breaks[2] - h$breaks[1]
+pseq = seq(0, 1, by=0.05)
+
+plot(h, xlab='p', main='')
+lines(pseq, m*d*1*dunif(pseq), col='red', lwd=3)
+
+### Histogram of z-values with theoretial null pi0=1 line
+h = hist(dat$z, breaks=100, plot=F)
+d = h$breaks[2] - h$breaks[1]
+zseq = seq(-6, 15, by=0.1)
+
+plot(h, xlab='z', main='')
+lines(zseq, m*d*1*dnorm(zseq), col='red', lwd=3)
+
+title("Underdispersed Simulation", line = -2, outer = TRUE)
+par(mfrow=c(1,1), cex=1)
+
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+Real-world example:
+
+```{r Figure 1 snp, fig.width=8, fig.height=4.5}
+if(run_snp_ex==TRUE) {
+  
+### Figure 1: Distribution of p-values and z-values
+
+# SNP
+dat = dat_snp; m = m_snp
+dat$p = dat$p_1su
+
+if(save_figs == TRUE) {
+  png(filename=file.path(project.folder,"Figures/Fig1_snp.png"), width=500, height=300, units='mm', res=250)
+  mult = 1.92
+} else {mult = 1}
+
+par(mfrow=c(1,2), cex=1.3*mult)
+## Histogram of p-values with  theoretical null pi0=1 line
+h = hist(dat$p, breaks=100, plot=F)
+d = h$breaks[2] - h$breaks[1]
+pseq = seq(0, 1, by=0.05)
+
+plot(h, xlab='p', main='')
+lines(pseq, m*d*1*dunif(pseq), col='red', lwd=3)
+
+### Histogram of z-values with theoretial null pi0=1 line
+h = hist(dat$z, breaks=100, plot=F)
+d = h$breaks[2] - h$breaks[1]
+zseq = seq(-6, 15, by=0.1)
+
+plot(h, xlab='z', main='', ylim=c(0,12000))
+lines(zseq, m*d*1*dnorm(zseq), col='red', lwd=3)
+
+title("Prostate Cancer SNP Example", line = -2, outer = TRUE)
+par(mfrow=c(1,1), cex=1)
+
+if(save_figs == TRUE) {dev.off()}
+
+}
+```
+
+
+
+# Data tables for one-sided upper tail rejection regions
+
+Table 2a (Simple simulation): Data table for unadjusted (one-sided upper tail) rejection region
+
+```{r Table 2 sim}
+dat = dat_sim; m = m_sim; pi0 = pi0_sim 
+
+D_Unadj_05 = GenDataTable(p=dat$p, truth=dat$truth, m=m, pi0=pi0, method='unadjusted')
+PrintDataTable(D_Unadj_05, title="Unadjusted, 0.05")
+```
+
+Breakdown by effect size:
+
+```{r Table 2 sim effect size breakdown}
+tbl_Unadj_05 = table(dat$eff, ifelse(dat$p <= 0.05, "reject", "inconclusive"))
+kable(cbind("True Eff" = as.numeric(names(table(dat$eff))), "Total" = table(dat$eff), tbl_Unadj_05, "Pct(Eff | reject)" = prop.table(tbl_Unadj_05, 2)[,2], "Pct(reject | Eff)" = prop.table(tbl_Unadj_05, 1)[,2]), row.names=F)
+```
+
+Table 2b (Simple simulation): Data table for Bonferroni procedure (based on one-sided upper tail p-values)
+
+```{r Table 3 sim}
+D_Bonf = GenDataTable(p=dat$p, truth=dat$truth, m=m, pi0=pi0, method='bonferroni')
+PrintDataTable(D_Bonf, title="Bonferroni Method")
+```
+
+Breakdown by effect size:
+
+```{r Table 3 sim effect size breakdown}
+tbl_Bonf = table(dat$eff, ifelse(dat$bonf_adj <= 0.05, "reject", "inconclusive"))
+kable(cbind("True Eff" = as.numeric(names(table(dat$eff))), "Total" = table(dat$eff), tbl_Bonf, "Pct(Eff | reject)" = prop.table(tbl_Bonf, 2)[,2], "Pct(reject | Eff)" = prop.table(tbl_Bonf, 1)[,2]), row.names=F)
+```
+
+Table 2c (Simple simulation): Data table for BH procedure (based on one-sided upper tail p-values)
+
+```{r Table 4 sim}
+D_BH = GenDataTable(p=dat$p, truth=dat$truth, m=m, pi0=pi0, method='bh')
+PrintDataTable(D_BH, title="Benjamini-Hochberg Method")
+```
+
+Breakdown by effect size:
+
+```{r Table 4 sim effect size breakdown}
+tbl_BH = table(dat$eff, ifelse(dat$BH_adj <= 0.05, "reject", "inconclusive"))
+kable(cbind("True Eff" = as.numeric(names(table(dat$eff))), "Total" = table(dat$eff), tbl_BH, "Pct(Eff | reject)" = prop.table(tbl_BH, 2)[,2], "Pct(reject | Eff)" = prop.table(tbl_BH, 1)[,2]), row.names=FALSE)
+```
+
+```{r Table 4 sim effect size breakdown with monotone FDR, eval = FALSE}
+## Breakdown by effect size (Based on FDR not BH adj. p-val (i.e. pFDR not q-value))
+tbl_BHfdr = table(dat$eff, ifelse(dat$BH_Fdr <= 0.05, "reject", "inconclusive"))
+kable(cbind("True Eff" = as.numeric(names(table(dat$eff))), "Total" = table(dat$eff), tbl_BHfdr, "Pct(Eff | reject)" = prop.table(tbl_BHfdr, 2)[,2], "Pct(reject | Eff)" = prop.table(tbl_BHfdr, 1)[,2]), row.names=FALSE)
+```
+
+Table 2a (Underdispersed simulation): Data table for unadjusted (one-sided upper tail) rejection region
+
+```{r Table 2 undspsim}
+dat = dat_undspsim; m = m_undspsim; pi0 = pi0_undspsim
+
+D_Unadj_05 = GenDataTable(p=dat$p, truth=dat$truth, m=m, pi0=pi0, method='unadjusted')
+PrintDataTable(D_Unadj_05, title="Unadjusted, 0.05")
+```
+
+Breakdown by effect size:
+
+```{r Table 2 undspsim effect size breakdown}
+tbl_Unadj_05 = table(dat$eff, ifelse(dat$p <= 0.05, "reject", "inconclusive"))
+kable(cbind("True Eff" = as.numeric(names(table(dat$eff))), "Total" = table(dat$eff), tbl_Unadj_05, "Pct(Eff | reject)" = prop.table(tbl_Unadj_05, 2)[,2], "Pct(reject | Eff)" = prop.table(tbl_Unadj_05, 1)[,2]), row.names=FALSE)
+```
+
+Table 2b (Underdispersed simulation): Data table for Bonferroni procedure (based on one-sided upper tail p-values)
+
+```{r Table 3 undspsim}
+D_Bonf = GenDataTable(p=dat$p, truth=dat$truth, m=m, pi0=pi0, method='bonferroni')
+PrintDataTable(D_Bonf, title="Bonferroni Method")
+```
+
+Breakdown by effect size:
+
+```{r Table 3 undspsim effect size breakdown}
+tbl_Bonf = table(dat$eff, ifelse(dat$bonf_adj <= 0.05, "reject", "inconclusive"))
+kable(cbind("True Eff" = as.numeric(names(table(dat$eff))), "Total" = table(dat$eff), tbl_Bonf, "Pct(Eff | reject)" = prop.table(tbl_Bonf, 2)[,2], "Pct(reject | Eff)" = prop.table(tbl_Bonf, 1)[,2]), row.names=FALSE)
+```
+
+Table 2c (Underdispersed simulation): Data table for BH procedure (based on one-sided upper tail p-values)
+
+```{r Table 4 undspsim}
+D_BH = GenDataTable(p=dat$p, truth=dat$truth, m=m, pi0=pi0, method='bh')
+PrintDataTable(D_BH, title="Benjamini-Hochberg Method")
+```
+
+Breakdown by effect size:
+
+```{r Table 4 undspsim effect size breakdown}
+tbl_BH = table(dat$eff, ifelse(dat$BH_adj <= 0.05, "reject", "inconclusive"))
+kable(cbind("True Eff" = as.numeric(names(table(dat$eff))), "Total" = table(dat$eff), tbl_BH, "Pct(Eff | reject)" = prop.table(tbl_BH, 2)[,2], "Pct(reject | Eff)" = prop.table(tbl_BH, 1)[,2]), row.names=FALSE)
+```
+
+```{r Table 4 undspsim effect size breakdown with monotone FDR, eval = FALSE}
+## Breakdown by effect size (Based on FDR not BH adj. p-val (i.e. pFDR not q-value))
+tbl_BHfdr = table(dat$eff, ifelse(dat$BH_Fdr <= 0.05, "reject", "inconclusive"))
+kable(cbind("True Eff" = as.numeric(names(table(dat$eff))), "Total" = table(dat$eff), tbl_BHfdr, "Pct(Eff | reject)" = prop.table(tbl_BHfdr, 2)[,2], "Pct(reject | Eff)" = prop.table(tbl_BHfdr, 1)[,2]), row.names=FALSE)
+```
+
+Supplementary Table 1a (Real world example): Data table for unadjusted (one-sided upper tail) rejection region
+
+```{r Table 2 snp}
+if(run_snp_ex==TRUE) {
+dat = dat_snp; m = m_snp; pi0 = NULL; dat$truth = NULL
+
+### Table 2: Data table for unadjusted (one-sided upper tail) rejection region 
+
+D_Unadj_05 = GenDataTable(p=dat$p, truth=dat$truth, m=m, pi0=pi0, method='unadjusted')
+PrintDataTable(D_Unadj_05, title="Unadjusted, 0.05")
+}
+```
+
+Supplementary Table 1b (Real world example): Data table for Bonferroni procedure (based on one-sided upper tail p-values)
+
+```{r Table 3 snp}
+if(run_snp_ex==TRUE) {
+dat = dat_snp; m = m_snp; pi0 = NULL; dat$truth = NULL
+
+### Table 3: Data table for Bonferroni procedure (based on one-sided upper tail p-values)
+
+D_Bonf = GenDataTable(p=dat$p, truth=dat$truth, m=m, pi0=pi0, method='bonferroni')
+PrintDataTable(D_Bonf, title="Bonferroni Method")
+}
+```
+
+Supplementary Table 1c (Real world example): Data table for BH procedure (based on one-sided upper tail p-values)
+
+```{r Table 4 snp}
+if(run_snp_ex==TRUE) {
+dat = dat_snp; m = m_snp; pi0 = NULL; dat$truth = NULL
+
+### Table 4: Data table for BH procedure (based on one-sided upper tail p-values
+
+D_BH = GenDataTable(p=dat$p, truth=dat$truth, m=m, pi0=pi0, method='bh')
+PrintDataTable(D_BH, title="Benjamini-Hochberg Method")
+}
+```
+
+
+# Adjusted p-value plots: 
+
+Supplemental Figure 1 (Simple simulation): p-value & adjusted p-value plots (1-sided upper tail area p-values)
+
+```{r Figure 5 sim, fig.width=8, fig.height=6}
+
+dat = dat_sim; m = m_sim
+
+
+## Adjusted p-values for first XX ordered p-values
+dat = dat[order(dat$p),] # order by p-value
+
+if(save_figs == TRUE) {
+  # png(filename = "/Users/valeriewelty/Dropbox/Vandy/Research/Paper/fdr/Code/GitHub/Figures/Fig5_sim.png", width=300, height=200, units='mm', res=250)
+  png(filename = file.path(project.folder,"Figures/Fig5_sim.png"), width=300, height=200, units='mm', res=250)
+}
+
+par(cex=1.3)
+I = m  # I = m
+yl = c(0, max(dat$bonf_adj[1:I])) # c(0,1)  
+
+plot(1:I, dat$p[1:I], pch=16, cex=0.7, ylim=yl, xlab='p-value index (i)', ylab='adjusted p-value', main=" ")
+lines(1:I, dat$p[1:I], lwd=1)
+lines(c(1,I),rep(0.05,2), lty=2, lwd=2)
+
+# points(1:I, dat$BH_Fdr[1:I], pch=16, col='green', cex=0.85)
+# lines(1:I, dat$BH_Fdr[1:I], col='green', lwd=1)
+
+points(1:I, dat$BH_adj[1:I], pch=16, col='blue', cex=0.6)
+lines(1:I, dat$BH_adj[1:I], col='blue', lwd=1)
+
+points(1:I, dat$bonf_adj[1:I], pch=16, col='red', cex=0.7)
+lines(1:I, dat$bonf_adj[1:I], col='red', lwd=1)
+
+# legend(150, 0.012,
+#        c('Unadjusted', 'Bonferroni'),
+#        col=c('black', 'red'), lty=rep(1,2),
+#        lwd=rep(2, 2), bty='n', cex=0.8, y.intersp=0.1, seg.len = 1)
+
+# legend('topright',
+#        c('Unadjusted', 'Bonferroni', 'pFDR'),
+#        col=c('black', 'red', 'green'), lty=rep(1,3), 
+#        lwd=rep(2, 3), bty='n', cex=0.8, y.intersp=0.5, seg.len = 1)
+
+# legend('topright',
+#        c('Unadjusted', 'Bonferroni', 'Benjamini-Hochberg'),
+#        col=c('black', 'red', 'blue'), lty=rep(1,3),
+#        lwd=rep(2, 3), bty='n', cex=0.8, y.intersp=0.5, seg.len = 1)
+
+# legend('topright',
+#        c('Unadjusted', 'Bonferroni', 'pFDR', 'Benjamini-Hochberg'),
+#        col=c('black', 'red', 'green', 'blue'), lty=rep(1,4), 
+#        lwd=rep(2, 4), bty='n', cex=0.8, y.intersp=0.5, seg.len = 1)
+
+par(cex=1)
+
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+Supplemental Figure 1x (Underdispersed simulation): p-value & adjusted p-value plots (1-sided upper tail area p-values)
+
+```{r Figure 5 undspsim, fig.width=8, fig.height=6}
+
+dat = dat_undspsim; m = m_undspsim
+
+
+## Adjusted p-values for first XX ordered p-values
+dat = dat[order(dat$p),] # order by p-value
+
+if(save_figs == TRUE) {
+  # png(filename = "/Users/valeriewelty/Dropbox/Vandy/Research/Paper/fdr/Code/GitHub/Figures/Fig5_undspsim.png", width=300, height=200, units='mm', res=250)
+  png(filename = file.path(project.folder,"Figures/Fig5_undspsim.png"), width=300, height=200, units='mm', res=250)
+}
+
+par(cex=1.3)
+I = m  # I = m
+yl = c(0, max(dat$bonf_adj[1:I])) # c(0,1)  
+
+plot(1:I, dat$p[1:I], pch=16, cex=0.7, ylim=yl, xlab='p-value index (i)', ylab='adjusted p-value', main=" ")
+lines(1:I, dat$p[1:I], lwd=1)
+lines(c(1,I),rep(0.05,2), lty=2, lwd=2)
+
+# points(1:I, dat$BH_Fdr[1:I], pch=16, col='green', cex=0.85)
+# lines(1:I, dat$BH_Fdr[1:I], col='green', lwd=1)
+
+points(1:I, dat$BH_adj[1:I], pch=16, col='blue', cex=0.6)
+lines(1:I, dat$BH_adj[1:I], col='blue', lwd=1)
+
+points(1:I, dat$bonf_adj[1:I], pch=16, col='red', cex=0.7)
+lines(1:I, dat$bonf_adj[1:I], col='red', lwd=1)
+
+# legend(150, 0.012,
+#        c('Unadjusted', 'Bonferroni'),
+#        col=c('black', 'red'), lty=rep(1,2),
+#        lwd=rep(2, 2), bty='n', cex=0.8, y.intersp=0.1, seg.len = 1)
+
+# legend('topright',
+#        c('Unadjusted', 'Bonferroni', 'pFDR'),
+#        col=c('black', 'red', 'green'), lty=rep(1,3), 
+#        lwd=rep(2, 3), bty='n', cex=0.8, y.intersp=0.5, seg.len = 1)
+
+# legend('topright',
+#        c('Unadjusted', 'Bonferroni', 'Benjamini-Hochberg'),
+#        col=c('black', 'red', 'blue'), lty=rep(1,3),
+#        lwd=rep(2, 3), bty='n', cex=0.8, y.intersp=0.5, seg.len = 1)
+
+# legend('topright',
+#        c('Unadjusted', 'Bonferroni', 'pFDR', 'Benjamini-Hochberg'),
+#        col=c('black', 'red', 'green', 'blue'), lty=rep(1,4), 
+#        lwd=rep(2, 4), bty='n', cex=0.8, y.intersp=0.5, seg.len = 1)
+
+par(cex=1)
+
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+Supplemental Figure 1x (Real world example): p-value & adjusted p-value plots (1-sided upper tail area p-values)
+
+```{r Figure 5 snp, fig.width=8, fig.height=6}
+if(run_snp_ex==TRUE) {
+  
+dat = dat_snp; m = m_snp
+
+## Adjusted p-values for first XX ordered p-values
+dat = dat[order(dat$p),] # order by p-value
+
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder,"Figures/Fig5_snp.png"), width=300, height=200, units='mm', res=250)
+}
+
+par(cex=1.3)
+I = m  # I = m
+yl = c(0, max(dat$bonf_adj[1:I])) # c(0,1)  
+
+plot(1:I, dat$p[1:I], pch=16, cex=0.7, ylim=yl, xlab='p-value index (i)', ylab='adjusted p-value', main=" ")
+lines(1:I, dat$p[1:I], lwd=1)
+lines(c(1,I),rep(0.05,2), lty=2, lwd=2)
+
+# points(1:I, dat$BH_Fdr[1:I], pch=16, col='green', cex=0.85)
+# lines(1:I, dat$BH_Fdr[1:I], col='green', lwd=1)
+
+points(1:I, dat$BH_adj[1:I], pch=16, col='blue', cex=0.6)
+lines(1:I, dat$BH_adj[1:I], col='blue', lwd=1)
+
+points(1:I, dat$bonf_adj[1:I], pch=16, col='red', cex=0.7)
+lines(1:I, dat$bonf_adj[1:I], col='red', lwd=1)
+
+# legend(150, 0.012,
+#        c('Unadjusted', 'Bonferroni'),
+#        col=c('black', 'red'), lty=rep(1,2),
+#        lwd=rep(2, 2), bty='n', cex=0.8, y.intersp=0.1, seg.len = 1)
+
+# legend('topright',
+#        c('Unadjusted', 'Bonferroni', 'pFDR'),
+#        col=c('black', 'red', 'green'), lty=rep(1,3), 
+#        lwd=rep(2, 3), bty='n', cex=0.8, y.intersp=0.5, seg.len = 1)
+
+# legend('topright',
+#        c('Unadjusted', 'Bonferroni', 'Benjamini-Hochberg'),
+#        col=c('black', 'red', 'blue'), lty=rep(1,3),
+#        lwd=rep(2, 3), bty='n', cex=0.8, y.intersp=0.5, seg.len = 1)
+
+# legend('topright',
+#        c('Unadjusted', 'Bonferroni', 'pFDR', 'Benjamini-Hochberg'),
+#        col=c('black', 'red', 'green', 'blue'), lty=rep(1,4), 
+#        lwd=rep(2, 4), bty='n', cex=0.8, y.intersp=0.5, seg.len = 1)
+
+par(cex=1)
+
+if(save_figs == TRUE) {dev.off()}
+
+}
+```
+
+
+# Simulation distribution of R, V, and Q for various rejection regions/procedures
+
+## Simple simulation:
+  
+```{r Simple Simulated distribution of R V Q, eval = FALSE}
+
+## Don't re-run (approx 3 hr.); use pre-run saved results
+
+# ..................................................................... #
+####### Simulation - Distribution of R, V, Q for a fixed rejection region
+# ..................................................................... #
+
+set.seed(261239) ## seed number random, for preproducibility only
+
+m=1000
+pi0=0.85
+pi1a=0.15
+pi1b=0
+theta=2.4
+
+
+simreps = 100000
+R_distr_unadj = V_distr_unadj = Q_distr_unadj = 
+  R_distr_bonf = V_distr_bonf = Q_distr_bonf = 
+  R_distr_BH = V_distr_BH = Q_distr_BH = 
+  rep(NA, simreps)
+
+t0 = Sys.time()
+for(j in 1:simreps) {
+  
+  dat = Gen_Data(m=m, pi0=pi0, pi1a=pi1a, pi1b=pi1b, theta=theta) 
+  
+  z = dat$tsim
+  truth = dat$truth
+  ## -> truth = 0 [Null], truth = 1 [Non-null]
+  m = length(z)
+  
+  ## sort by z rather than p
+  idx = order(z)
+  z = z[idx]
+  truth = truth[idx]
+  
+  ## one-sided upper tail area rejection region
+  c = 0.05
+  p = 1-pnorm(z)
+  
+  ## unadjusted (one-sided tail area) rejection region
+  c_z = qnorm(1-c) # one-sided upper tail area  rejection region
+  reject = as.numeric((z >= c_z))
+  
+  R_distr_unadj[j] = R = sum(reject == 1)
+  V_distr_unadj[j] = V = sum(reject == 1 & truth == 0)
+  Q_distr_unadj[j] = V/max(R, 1)
+  
+  ## Bonferroni (one-sided tail area) rejection region
+  c_z = qnorm(1-c/m) # one-sided upper tail area  rejection region
+  reject = as.numeric((z >= c_z))
+  
+  R_distr_bonf[j] = R = sum(reject == 1)
+  V_distr_bonf[j] = V = sum(reject == 1 & truth == 0)
+  Q_distr_bonf[j] = V/max(R, 1)
+  
+  
+  ## Benjamini-Hochberg procedure
+  q = 0.05
+  idx = order(p)
+  z = z[idx]
+  p = p[idx]
+  truth = truth[idx]
+  thresh_bh = (1:length(p))/length(p)*q
+  i_max = max(which(p<=thresh_bh))
+  reject = p<=p[i_max]
+  
+  R_distr_BH[j] = R = sum(reject == 1)
+  V_distr_BH[j] = V = sum(reject == 1 & truth == 0)
+  Q_distr_BH[j] = V/max(R, 1)
+  
+}
+
+
+t1 = Sys.time()
+difference = difftime(t1, t0, units='mins')
+message(paste(round(difference, 3), "minutes"))
+
+
+RVQ_distr_sim = data.frame('R_unadj'=R_distr_unadj, 'V_unadj'=V_distr_unadj, 'Q_unadj'=Q_distr_unadj, 'R_bonf'=R_distr_bonf, 'V_bonf'=V_distr_bonf, 'Q_bonf'=Q_distr_bonf, 'R_BH'=R_distr_BH, 'V_BH'=V_distr_BH, 'Q_BH'=Q_distr_BH)
+
+save(RVQ_distr_sim, file=file.path(project.folder,"SavedResults/RVQ_distr_sim.Rdata"))
+
+# load(file=file.path(project.folder,"SavedResults/RVQ_distr_sim.Rdata"))
+
+
+```
+
+```{r Simple Simulated distribution of R V Q results}
+
+## Load saved results from code chunk above rather than re-running code
+load(file=file.path(project.folder,"SavedResults/RVQ_distr_sim.Rdata"))
+
+results = RVQ_distr_sim
+
+```
+
+
+Unadjusted rejection region
+
+Figures 2(a) & 2(b)
+
+```{r Figure 3a sim, fig.width=5, fig.height=5}
+
+results[,'R'] = results[,'R_unadj']; results[,'V'] = results[,'V_unadj']; results[,'Q'] = results[,'Q_unadj']
+
+print(paste("mean(R) = ", mean(results[,'R'])))
+print(paste("mean(V) = ", mean(results[,'V'])))
+print(paste("mean(V)/mean(R) = ", round(mean(results[,'V'])/mean(results[,'R']),5)))
+print(paste("mean(Q) = ", round(mean(results[,'Q']),5)))
+
+
+#### ~~> Figure 3(a) [Sim.] ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder,"Figures/Fig3a_sim.png"), width=200, height=200, units='mm', res=250)
+  mult = 1.5
+} else {mult = 1}
+
+library(RColorBrewer)
+buylrd = c("#FFFFFF", "#4575B4", "#74ADD1", "#ABD9E9", "#E0F3F8", "#FFFFBF",
+           "#FEE090", "#FDAE61", "#F46D43", "#D73027", "#A50026") 
+myColRamp = colorRampPalette(c(buylrd))
+
+par(cex=1*mult)
+smoothScatter(x=results[,'R'], y=results[,'V'],
+              colramp=myColRamp,
+              nbin=c(250,250),
+              main="Unadjusted",
+              xlab="R",
+              ylab="V")
+V_distr_exp = results[,'R']*mean(results[,'Q'])
+par(cex=1)
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+```{r Figure 3b sim, fig.width=5, fig.height=5}
+
+if(save_figs == TRUE) {
+  png(filename=file.path(project.folder,"Figures/Fig3b_sim.png"), width=200, height=200, units='mm', res=250)
+    mult = 1.5
+} else {mult = 1}
+
+## ~~> Figure 3(b) [Sim.] ##
+par(cex=1*mult)
+hist(results[,'Q'], breaks=100, freq=T
+     , yaxt='n', ylab=""
+     , xlab = "Q" # "Q \n (False Discovery Proportion)"
+     , main="Unadjusted")
+# hist(results[,'Q'], breaks=100, freq=F, xlim = c(0, 0.5), xlab = "Q \n (False Discovery Proportion)")
+abline(v=mean(results[,'Q']), col="blue", lty=1, lwd=2)
+par(cex=1)
+if(save_figs == TRUE) {dev.off()}
+
+
+```
+
+Benjamini-Hochberg rejection region
+
+Figures 2(c) & 2(d)
+
+```{r Figure 4a sim, fig.width=5, fig.height=5}
+
+results[,'R'] = results[,'R_BH']; results[,'V'] = results[,'V_BH']; results[,'Q'] = results[,'Q_BH']
+
+print(paste("mean(R) = ", mean(results[,'R'])))
+print(paste("mean(V) = ", mean(results[,'V'])))
+print(paste("mean(V)/mean(R) = ", round(mean(results[,'V'])/mean(results[,'R']),5)))
+print(paste("mean(Q) = ", round(mean(results[,'Q']),5)))
+
+
+#### ~~> Figure 4(a) [Sim.] ##
+if(save_figs == TRUE) {
+  png(filename=file.path(project.folder, "Figures/Fig4a_sim.png"), width=200, height=200, units='mm', res=250)
+  mult = 1.5
+} else {mult = 1}
+
+library(RColorBrewer)
+buylrd = c("#FFFFFF", "#4575B4", "#74ADD1", "#ABD9E9", "#E0F3F8", "#FFFFBF",
+           "#FEE090", "#FDAE61", "#F46D43", "#D73027", "#A50026") 
+myColRamp = colorRampPalette(c(buylrd))
+
+par(cex=1*mult)
+smoothScatter(x=results[,'R'], y=results[,'V'],
+              colramp=myColRamp,
+              nbin=c(250,250),
+              main="Benjamini-Hochberg",
+              xlab="R",
+              ylab="V")
+V_distr_exp = results[,'R']*mean(results[,'Q'])
+par(cex=1)
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+```{r Figure 4b sim, fig.width=5, fig.height=5}
+
+## ~~> Figure 4(b) [Sim.] ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig4b_sim.png"), width=200, height=200, units='mm', res=250)
+  mult = 1.5
+} else {mult = 1}
+
+par(cex=1*mult)
+hist(results[,'Q'], breaks=100, freq=T
+     , yaxt='n', ylab=""
+     , xlab = "Q" # "Q \n (False Discovery Proportion)"
+     , main="Benjamini-Hochberg")
+# hist(results[,'Q'], breaks=100, freq=F, xlim = c(0, 0.5), xlab = "Q \n (False Discovery Proportion)")
+abline(v=mean(results[,'Q']), col="blue", lty=1, lwd=2)
+par(cex=1)
+if(save_figs == TRUE) {dev.off()}
+
+
+```
+
+Analyical calculation of FWER, FDR, pFDR, and mFDR for simple simulation:
+
+```{r Calculate FWER FDQ quantities for simple simulation, cache=T}
+
+## Unadjusted, simple sim
+print("Unadjusted")
+c=0.05
+Calc_FDQ_quants(m=1000, pi0=0.85, # m0=850, m1=150,
+                a=1-pnorm(qnorm(1-c), mean=0, sd=1),
+                b=1-(1-pnorm(qnorm(1-c), mean=2.4, sd=1)))
+# FWER = 1
+# FDR = 0.2668418
+# pFDR = 0.2668418
+# mFDR = 0.2677369
+
+## Bonferroni, simple sim
+print("Bonferroni")
+c=0.05/1000
+Calc_FDQ_quants(m=1000, pi0=0.85, # m0=850, m1=150, 
+                a=1-pnorm(qnorm(1-c), mean=0, sd=1), 
+                b=1-(1-pnorm(qnorm(1-c), mean=2.4, sd=1)))
+# FWER = 0.04160974
+# FDR = 0.004118957
+# pFDR = 0.004119059
+# mFDR =  0.004147292
+
+```
+
+## Underdispersed simulation:
+  
+```{r Underdispersed Simulated distribution of R V Q, eval = FALSE}
+
+## Don't re-run (approx __ hr.); use pre-run saved results
+
+set.seed(7294) ## seed number random, for preproducibility only
+
+
+simreps = 100000
+R_distr_unadj = V_distr_unadj = Q_distr_unadj = 
+  R_distr_bonf = V_distr_bonf = Q_distr_bonf = 
+  R_distr_BH = V_distr_BH = Q_distr_BH = 
+  rep(NA, simreps)
+
+
+t0 = Sys.time()
+for(j in 1:simreps) {
+  
+  dat = Gen_Data_4gr_underdisp(m=50000, pi0=0.9, delta0=0, sigma0=0.95, delta1=c(0.3, 1, 3), sigma1=0.9, print.time=FALSE) 
+  
+  z = dat$z
+  truth = dat$truth
+  ## -> truth = 0 [Null], truth = 1 [Non-null]
+  m = length(z)
+  
+  ## sort by z rather than p
+  idx = order(z)
+  z = z[idx]
+  truth = truth[idx]
+  
+  
+  ## one-sided upper tail area rejection region
+  c = 0.05
+  p = 1-pnorm(z)
+  
+  ## unadjusted (one-sided tail area) rejection region
+  c_z = qnorm(1-c) # one-sided upper tail area  rejection region
+  reject = as.numeric((z >= c_z))
+  
+  R_distr_unadj[j] = R = sum(reject == 1)
+  V_distr_unadj[j] = V = sum(reject == 1 & truth == 0)
+  Q_distr_unadj[j] = V/max(R, 1)
+  
+  ## Bonferroni (one-sided tail area) rejection region
+  c_z = qnorm(1-c/m) # one-sided upper tail area  rejection region
+  reject = as.numeric((z >= c_z))
+  
+  R_distr_bonf[j] = R = sum(reject == 1)
+  V_distr_bonf[j] = V = sum(reject == 1 & truth == 0)
+  Q_distr_bonf[j] = V/max(R, 1)
+  
+  
+  ## Benjamini-Hochberg procedure
+  q = 0.05
+  idx = order(p)
+  z = z[idx]
+  p = p[idx]
+  truth = truth[idx]
+  thresh_bh = (1:length(p))/length(p)*q
+  i_max = max(which(p<=thresh_bh))
+  reject = p<=p[i_max]
+  
+  R_distr_BH[j] = R = sum(reject == 1)
+  V_distr_BH[j] = V = sum(reject == 1 & truth == 0)
+  Q_distr_BH[j] = V/max(R, 1)
+  
+  
+}
+
+
+t1 = Sys.time()
+difference = difftime(t1, t0, units='mins')
+message(paste(round(difference, 3), "minutes"))
+
+
+
+RVQ_distr_undspsim = data.frame('R_unadj'=R_distr_unadj, 'V_unadj'=V_distr_unadj, 'Q_unadj'=Q_distr_unadj, 'R_bonf'=R_distr_bonf, 'V_bonf'=V_distr_bonf, 'Q_bonf'=Q_distr_bonf, 'R_BH'=R_distr_BH, 'V_BH'=V_distr_BH, 'Q_BH'=Q_distr_BH)
+
+
+
+save(RVQ_distr_undspsim, file=file.path(project.folder, "SavedResults/RVQ_distr_undspsim_0.9.Rdata"))
+
+load(file=file.path(project.folder, "SavedResults/RVQ_distr_undspsim_0.9.Rdata"))
+
+
+```
+
+```{r Underdispersed Simulated distribution of R V Q results}
+
+## Load saved results from code chunk above rather than re-running code
+load(file=file.path(project.folder, "SavedResults/RVQ_distr_undspsim_0.9.Rdata"))
+
+results = RVQ_distr_undspsim
+
+```
+
+
+Unadjusted rejection region
+
+```{r Figure 3a undspsim, fig.width=5, fig.height=5}
+
+results[,'R'] = results[,'R_unadj']; results[,'V'] = results[,'V_unadj']; results[,'Q'] = results[,'Q_unadj']
+
+print(paste("mean(R) = ", mean(results[,'R'])))
+print(paste("mean(V) = ", mean(results[,'V'])))
+print(paste("mean(V)/mean(R) = ", round(mean(results[,'V'])/mean(results[,'R']),5)))
+print(paste("mean(Q) = ", round(mean(results[,'Q']),5)))
+
+
+#### ~~> Figure 3(a) [Undsp.Sim.] ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig3a_undspsim.png"), width=200, height=200, units='mm', res=250)
+  mult = 1.5
+} else {mult = 1}
+
+# library(RColorBrewer)
+buylrd = c("#FFFFFF", "#4575B4", "#74ADD1", "#ABD9E9", "#E0F3F8", "#FFFFBF",
+           "#FEE090", "#FDAE61", "#F46D43", "#D73027", "#A50026") 
+myColRamp = colorRampPalette(c(buylrd))
+
+par(cex=1*mult)
+smoothScatter(x=results[,'R'], y=results[,'V'],
+              colramp=myColRamp,
+              nbin=c(250,250),
+              main="Unadjusted",
+              xlab="R",
+              ylab="V")
+V_distr_exp = results[,'R']*mean(results[,'Q'])
+par(cex=1)
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+```{r Figure 3b undspsim, fig.width=5, fig.height=5}
+
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig3b_undspsim.png"), width=200, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+
+## ~~> Figure 3(b) [Undsp.Sim.] ##
+par(cex=1*mult)
+hist(results[,'Q'], breaks=100, freq=T
+     , yaxt='n', ylab=""
+     , xlab = "Q" # "Q \n (False Discovery Proportion)"
+     , main="Unadjusted")
+# hist(results[,'Q'], breaks=100, freq=F, xlim = c(0, 0.5), xlab = "Q \n (False Discovery Proportion)")
+abline(v=mean(results[,'Q']), col="blue", lty=1, lwd=2)
+par(cex=1)
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+
+Benjamini-Hochberg rejection region
+
+```{r Figure 4a undspsim, fig.width=5, fig.height=5}
+
+results[,'R'] = results[,'R_BH']; results[,'V'] = results[,'V_BH']; results[,'Q'] = results[,'Q_BH']
+
+print(paste("mean(R) = ", mean(results[,'R'])))
+print(paste("mean(V) = ", mean(results[,'V'])))
+print(paste("mean(V)/mean(R) = ", round(mean(results[,'V'])/mean(results[,'R']),5)))
+print(paste("mean(Q) = ", round(mean(results[,'Q']),5)))
+
+
+#### ~~> Figure 4(a) [Undsp.Sim.] ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig4a_undspsim.png"), width=200, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+
+# library(RColorBrewer)
+buylrd = c("#FFFFFF", "#4575B4", "#74ADD1", "#ABD9E9", "#E0F3F8", "#FFFFBF",
+           "#FEE090", "#FDAE61", "#F46D43", "#D73027", "#A50026") 
+myColRamp = colorRampPalette(c(buylrd))
+
+par(cex=1*mult)
+smoothScatter(x=results[,'R'], y=results[,'V'],
+              colramp=myColRamp,
+              nbin=c(250,250),
+              main="Benjamini-Hochberg",
+              xlab="R",
+              ylab="V")
+V_distr_exp = results[,'R']*mean(results[,'Q'])
+par(cex=1)
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+```{r Figure 4b undspsim, fig.width=5, fig.height=5}
+
+## ~~> Figure 4(b) [Undsp.Sim.] ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig4b_unspsim.png"), width=200, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+
+par(cex=1*mult)
+hist(results[,'Q'], breaks=100, freq=T
+     , yaxt='n', ylab=""
+     , xlab = "Q" # "Q \n (False Discovery Proportion)"
+     , main="Benjamini-Hochberg")
+# hist(results[,'Q'], breaks=100, freq=F, xlim = c(0, 0.5), xlab = "Q \n (False Discovery Proportion)")
+abline(v=mean(results[,'Q']), col="blue", lty=1, lwd=2)
+par(cex=1)
+if(save_figs == TRUE) {dev.off()}
+
+
+```
+
+Analyical calculation of FWER, FDR, pFDR, and mFDR for underdispersed simulation:
+
+```{r Calculate FWER FDQ quantities for underdispersed simulation, cache=T}
+
+## Unadjusted, underdispersed sim
+print("Unadjusted")
+c=0.05
+Calc_FDQ_quants(m=50000, pi0=0.9, # m0=45000, m1=5000, 
+                a=1-pnorm(qnorm(1-c), mean=0, sd=0.9), 
+                b=1-1/3*((1-pnorm(qnorm(1-c), mean=0.3, sd=0.9))
+                         +(1-pnorm(qnorm(1-c), mean=1, sd=0.9))
+                         +(1-pnorm(qnorm(1-c), mean=3, sd=0.9))))
+# FWER = 1
+# FDR = 0.4242839
+# pFDR = 0.4242839
+# mFDR = 0.4243098
+
+
+## Bonferroni, underdispersed sim
+print("Bonferroni")
+c=0.05/50000
+Calc_FDQ_quants(m=50000, pi0=0.9, # m0=45000, m1=5000, 
+                a=1-pnorm(qnorm(1-c), mean=0, sd=0.9), 
+                b=1-1/3*((1-pnorm(qnorm(1-c), mean=0.3, sd=0.9))
+                         +(1-pnorm(qnorm(1-c), mean=1, sd=0.9))
+                         +(1-pnorm(qnorm(1-c), mean=3, sd=0.9))))
+# FWER = 0.00287749
+# FDR = 0.00006723612
+# pFDR = 0.00006723612
+# mFDR = 0.00006724972  
+
+
+```
+
+
+# Simulation Estimates of true pFDR, FDR, and local FDR
+
+## Simple simulation:
+  
+```{r Simple Simulation estimates of true FDQs, eval = FALSE}
+
+## Don't re-run (approx __ hr.); use pre-run saved results
+
+
+m=1000
+pi0=0.85
+pi1a=0.15
+pi1b=0
+theta=2.4
+
+
+set.seed(573025) ## seed number random, for preproducibility only
+
+simreps = 100000
+zseq_sim = seq(-4, 6, by=0.1)
+true_loc_delta = 0.1
+
+R_1su_zseq_sim = V_1su_zseq_sim =  Q_1su_zseq_sim = Q_conditional_1su_zseq_sim = 
+  R_2s_zseq_sim = V_2s_zseq_sim = Q_2s_zseq_sim = Q_conditional_2s_zseq_sim = 
+  R_loc_zseq_sim = V_loc_zseq_sim = Q_loc_zseq_sim = Q_conditional_loc_zseq_sim = 
+  R_loc_approx_zseq_sim = V_loc_approx_zseq_sim = Q_loc_approx_zseq_sim = Q_conditional_loc_approx_zseq_sim = 
+  matrix(NA, ncol=length(zseq_sim), nrow=simreps)
+
+
+t0 = Sys.time()
+
+for(i in 1:length(zseq_sim)) {
+  for(j in 1:simreps) {
+    
+    dat = Gen_Data(m=m, pi0=pi0, pi1a=pi1a, pi1b=pi1b, theta=theta) 
+    
+    z = dat$tsim
+    truth = dat$truth
+    ## -> truth = 0 [Null], truth = 1 [Non-null]
+    m = length(z)
+    
+    ## sort by z rather than p
+    idx = order(z)
+    z = z[idx]
+    truth = truth[idx]
+    
+    
+    ## one-sided upper tail area rejection region/p-values
+    # p = 1-pnorm(z)
+    reject = as.numeric((z >= zseq_sim[i]))
+    
+    R_1su_zseq_sim[j,i] = R = sum(reject == 1)
+    V_1su_zseq_sim[j,i] = V = sum(reject == 1 & truth == 0)
+    Q_1su_zseq_sim[j,i] = V/max(R, 1)
+    Q_conditional_1su_zseq_sim[j,i] = ifelse(R > 0, V/R, NA)
+    
+    
+    ## two-sided rejection region/p-values
+    # p = pnorm(-abs(z)) + (1 - pnorm(abs(z)))
+    reject = as.numeric((z <= -abs(zseq_sim[i])) | (z >= abs(zseq_sim[i])))
+    
+    R_2s_zseq_sim[j,i] = R = sum(reject == 1)
+    V_2s_zseq_sim[j,i] = V = sum(reject == 1 & truth == 0)
+    Q_2s_zseq_sim[j,i] = V/max(R, 1)
+    Q_conditional_2s_zseq_sim[j,i] = ifelse(R > 0, V/R, NA)
+    
+    
+    ## local rejection region p-values
+    reject = as.numeric(z == zseq_sim[i])
+    
+    R_loc_zseq_sim[j,i] = R = sum(reject == 1)
+    V_loc_zseq_sim[j,i] = V = sum(reject == 1 & truth == 0)
+    Q_loc_zseq_sim[j,i] = V/max(R, 1)
+    Q_conditional_loc_zseq_sim[j,i] = ifelse(R > 0, V/R, NA)
+    
+    
+    reject_approx = as.numeric(z >= zseq_sim[i]-true_loc_delta & z < zseq_sim[i]+true_loc_delta)
+    
+    R_loc_approx_zseq_sim[j,i] = R = sum(reject_approx == 1)
+    V_loc_approx_zseq_sim[j,i] = V = sum(reject_approx == 1 & truth == 0)
+    Q_loc_approx_zseq_sim[j,i] = V/max(R, 1)
+    Q_conditional_loc_approx_zseq_sim[j,i] = ifelse(R > 0, V/R, NA)
+    
+  }
+}
+
+
+t1 = Sys.time()
+difference = difftime(t1, t0, units='mins')
+message(paste(round(difference, 3), "minutes"))
+
+
+truepFDR_sim_ests_raw = listNamed(R_1su_zseq_sim, V_1su_zseq_sim, Q_1su_zseq_sim, Q_conditional_1su_zseq_sim, R_2s_zseq_sim, V_2s_zseq_sim, Q_2s_zseq_sim, Q_conditional_2s_zseq_sim, R_loc_zseq_sim, V_loc_zseq_sim, Q_loc_zseq_sim, Q_conditional_loc_zseq_sim, R_loc_approx_zseq_sim, V_loc_approx_zseq_sim, Q_loc_approx_zseq_sim, Q_conditional_loc_approx_zseq_sim)
+
+save(truepFDR_sim_ests_raw, file=file.path(project.folder, "SavedResults/truepFDR_sim_ests_raw_100K.Rdata"))
+# load(file=file.path(project.folder, "SavedResults/truepFDR_sim_ests_raw_100K.Rdata"))
+# list2env(truepFDR_sim_ests_raw, .GlobalEnv)
+
+
+mean_zseq_fun = function(x, zseq = zseq_sim) {
+  sapply(1:length(zseq), function(i) mean(x[,i], na.rm=TRUE))
+}
+
+E_R_1su_zseq_sim = mean_zseq_fun(x=R_1su_zseq_sim)
+E_V_1su_zseq_sim = mean_zseq_fun(x=V_1su_zseq_sim)
+FDR_1su_zseq_sim = mean_zseq_fun(x=Q_1su_zseq_sim)
+pFDR_1su_zseq_sim = mean_zseq_fun(x=Q_conditional_1su_zseq_sim)
+
+E_R_2s_zseq_sim = mean_zseq_fun(x=R_2s_zseq_sim)
+E_V_2s_zseq_sim = mean_zseq_fun(x=V_2s_zseq_sim)
+FDR_2s_zseq_sim = mean_zseq_fun(x=Q_2s_zseq_sim)
+pFDR_2s_zseq_sim = mean_zseq_fun(x=Q_conditional_2s_zseq_sim)
+
+E_R_loc_zseq_sim = mean_zseq_fun(x=R_loc_zseq_sim)
+E_V_loc_zseq_sim = mean_zseq_fun(x=V_loc_zseq_sim)
+FDR_loc_zseq_sim = mean_zseq_fun(x=Q_loc_zseq_sim)
+pFDR_loc_zseq_sim = mean_zseq_fun(x=Q_conditional_loc_zseq_sim)
+
+E_R_loc_approx_zseq_sim = mean_zseq_fun(x=R_loc_approx_zseq_sim)
+E_V_loc_approx_zseq_sim = mean_zseq_fun(x=V_loc_approx_zseq_sim)
+FDR_loc_approx_zseq_sim = mean_zseq_fun(x=Q_loc_approx_zseq_sim)
+pFDR_loc_approx_zseq_sim = mean_zseq_fun(x=Q_conditional_loc_approx_zseq_sim)
+
+
+
+## Save quantities in memory so we can use them later without running this code
+truepFDR_sim_ests = listNamed(zseq_sim, simreps, 
+                              FDR_1su_zseq_sim, pFDR_1su_zseq_sim, 
+                              FDR_2s_zseq_sim, pFDR_2s_zseq_sim, 
+                              FDR_loc_zseq_sim, pFDR_loc_zseq_sim, 
+                              FDR_loc_approx_zseq_sim, pFDR_loc_approx_zseq_sim)
+
+save(truepFDR_sim_ests, file=file.path(project.folder, "SavedResults/truepFDR_sim_ests.Rdata"))
+# load(file=file.path(project.folder, "SavedResults/truepFDR_sim_ests.Rdata"))
+# list2env(truepFDR_sim_ests, .GlobalEnv)
+
+
+```
+
+
+```{r Simple Simulation estimates of true FDQs Results, results='hide'}
+
+## Load saved results from code chunk above rather than re-running code
+load(file=file.path(project.folder, "SavedResults/truepFDR_sim_ests.Rdata"))
+list2env(truepFDR_sim_ests, .GlobalEnv)
+
+load(file=file.path(project.folder, "SavedResults/truepFDR_sim_ests_raw_100K.Rdata"))
+list2env(truepFDR_sim_ests_raw, .GlobalEnv)
+
+```
+
+```{r Figure 6 sim, fig.width=7.5, fig.height=5}
+
+## ~~> Figure 6 [1su] [Sim.] ##
+### ~~> 1-Sided Upper-Tail Area Rejection Regions Plot ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig6_1su_sim.png"), width=300, height=200, units='mm', res=250)
+}
+
+plot(NULL, xlim=c(min(zseq_sim),max(zseq_sim)), ylim=c(0,1), xlab='z', ylab='pFDR')
+# lines(zseq_sim, FDR_1su_zseq_sim, lty=2)
+# lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_1su_zseq_sim[,i], prob=0.025)), col='grey', lty=2)
+# lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_1su_zseq_sim[,i], prob=0.975)), col='grey', lty=2)
+lines(zseq_sim, pFDR_1su_zseq_sim, col='black', lty=1, lwd=2)
+lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_conditional_1su_zseq_sim[,i], prob=0.025, na.rm=T)), col='grey', lty=1, lwd=2)
+lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_conditional_1su_zseq_sim[,i], prob=0.975, na.rm=T)), col='grey', lty=1, lwd=2)
+if(save_figs == TRUE) {dev.off()}
+
+## ~~> Figure 6 [2s] [Sim.] ##
+### ~~> 2-Sided Rejection Regions Plot ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig6_2s_sim.png"), width=300, height=200, units='mm', res=250)
+}
+
+plot(NULL, xlim=c(min(zseq_sim),max(zseq_sim)), ylim=c(0,1), xlab='z', ylab='pFDR')
+# lines(zseq_sim, FDR_2s_zseq_sim, lty=2)
+# lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_2s_zseq_sim[,i], prob=0.025)), col='grey', lty=2)
+# lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_2s_zseq_sim[,i], prob=0.975)), col='grey', lty=2)
+lines(zseq_sim, pFDR_2s_zseq_sim, col='black', lty=1, lwd=2)
+lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_conditional_2s_zseq_sim[,i], prob=0.025, na.rm=T)), col='grey', lty=1, lwd=2)
+lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_conditional_2s_zseq_sim[,i], prob=0.975, na.rm=T)), col='grey', lty=1, lwd=2)
+if(save_figs == TRUE) {dev.off()}
+
+
+## ~~> Figure 6 [loc] [Sim.] ##
+### ~~> Loc FDR Simulation Estimates ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig6_loc_sim.png"), width=300, height=200, units='mm', res=250)
+}
+
+plot(NULL, xlim=c(min(zseq_sim), max(zseq_sim)), ylim=c(0,1), xlab='z', ylab='pFDR')
+lines(zseq_sim, FDR_loc_approx_zseq_sim, col='pink', lty=1, lwd=2)
+lines(zseq_sim, pFDR_loc_approx_zseq_sim, col='grey', lty=1, lwd=2)
+lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_conditional_loc_approx_zseq_sim[,i], prob=0.025, na.rm=T)), col='grey', lty=2, lwd=2)
+lines(zseq_sim, sapply(1:length(zseq_sim), function(i) quantile(Q_conditional_loc_approx_zseq_sim[,i], prob=0.975, na.rm=T)), col='grey', lty=2, lwd=2)
+
+if(save_figs == FALSE) {
+legend(2.5, 1.03, c('Local FDR (approx, delta=0.1)',
+                    'Local pFDR (approx, delta=0.1)',
+                    '95% Percentile Interval of ',
+                    '    Local pFDR (approx)'),
+       col=c('pink', 'grey', 'grey', NA),
+       lty=c(1, 1, 2, NA), bty='n', cex=0.7, y.intersp=1)
+}
+
+if(save_figs == TRUE) {
+legend(3.1, 1, c('Local FDR (approx, delta=0.1)',
+                    'Local pFDR (approx, delta=0.1)',
+                    '95% Percentile Interval of ',
+                    '    Local pFDR (approx)'),
+       col=c('pink', 'grey', 'grey', NA),
+       lty=c(1, 1, 2, NA), bty='n', cex=1, y.intersp=1)
+}
+
+if(save_figs == TRUE) {dev.off()}
+
+
+```
+
+## Underdispersed simulation: 
+  
+```{r Underdispersed Simulation estimates of true FDQs, eval = FALSE}
+
+## Don't re-run (approx 39 hr.); use pre-run saved results
+
+
+set.seed(642974) ## seed number random, for preproducibility only
+
+simreps = 100000 
+zseq_undspsim = seq(-4, 6, by=0.1)
+true_loc_delta = 0.1
+
+R_1su_zseq_undspsim = V_1su_zseq_undspsim =  Q_1su_zseq_undspsim = Q_conditional_1su_zseq_undspsim = 
+  R_2s_zseq_undspsim = V_2s_zseq_undspsim = Q_2s_zseq_undspsim = Q_conditional_2s_zseq_undspsim = 
+  R_loc_zseq_undspsim = V_loc_zseq_undspsim = Q_loc_zseq_undspsim = Q_conditional_loc_zseq_undspsim = 
+  R_loc_approx_zseq_undspsim = V_loc_approx_zseq_undspsim = Q_loc_approx_zseq_undspsim = Q_conditional_loc_approx_zseq_undspsim = 
+  matrix(NA, ncol=length(zseq_undspsim), nrow=simreps)
+
+
+t0 = Sys.time()
+
+for(i in 1:length(zseq_undspsim)) { 
+  for(j in 1:simreps) {
+    
+    dat = Gen_Data_4gr_underdisp(m=50000, pi0=0.9, delta0=0, sigma0=0.9, delta1=c(0.3, 1, 3), sigma1=0.9, print.time=FALSE) 
+    
+    
+    z = dat$z
+    truth = dat$truth
+    ## -> truth = 0 [Null], truth = 1 [Non-null]
+    m = length(z)
+    
+    ## sort by z rather than p
+    idx = order(z)
+    z = z[idx]
+    truth = truth[idx]
+    
+    
+    ## one-sided upper tail area rejection region/p-values
+    # p = 1-pnorm(z)
+    reject = as.numeric((z >= zseq_undspsim[i]))
+    
+    R_1su_zseq_undspsim[j,i] = R = sum(reject == 1)
+    V_1su_zseq_undspsim[j,i] = V = sum(reject == 1 & truth == 0)
+    Q_1su_zseq_undspsim[j,i] = V/max(R, 1)
+    Q_conditional_1su_zseq_undspsim[j,i] = ifelse(R > 0, V/R, NA)
+    
+    
+    ## two-sided rejection region/p-values
+    # p = pnorm(-abs(z)) + (1 - pnorm(abs(z)))
+    reject = as.numeric((z <= -abs(zseq_undspsim[i])) | (z >= abs(zseq_undspsim[i])))
+    
+    R_2s_zseq_undspsim[j,i] = R = sum(reject == 1)
+    V_2s_zseq_undspsim[j,i] = V = sum(reject == 1 & truth == 0)
+    Q_2s_zseq_undspsim[j,i] = V/max(R, 1)
+    Q_conditional_2s_zseq_undspsim[j,i] = ifelse(R > 0, V/R, NA)
+    
+    
+    ## local rejection region p-values
+    reject = as.numeric(z == zseq_undspsim[i])
+    
+    R_loc_zseq_undspsim[j,i] = R = sum(reject == 1)
+    V_loc_zseq_undspsim[j,i] = V = sum(reject == 1 & truth == 0)
+    Q_loc_zseq_undspsim[j,i] = V/max(R, 1)
+    Q_conditional_loc_zseq_undspsim[j,i] = ifelse(R > 0, V/R, NA)
+    
+    
+    reject_approx = as.numeric(z >= zseq_undspsim[i]-true_loc_delta & z < zseq_undspsim[i]+true_loc_delta)
+    
+    R_loc_approx_zseq_undspsim[j,i] = R = sum(reject_approx == 1)
+    V_loc_approx_zseq_undspsim[j,i] = V = sum(reject_approx == 1 & truth == 0)
+    Q_loc_approx_zseq_undspsim[j,i] = V/max(R, 1)
+    Q_conditional_loc_approx_zseq_undspsim[j,i] = ifelse(R > 0, V/R, NA)
+    
+  }
+}
+
+
+t1 = Sys.time()
+difference = difftime(t1, t0, units='mins')
+message(paste(round(difference, 3), "minutes"))
+
+
+truepFDR_undspsim_0.9_ests_raw = listNamed(R_1su_zseq_undspsim, V_1su_zseq_undspsim, Q_1su_zseq_undspsim, Q_conditional_1su_zseq_undspsim, R_2s_zseq_undspsim, V_2s_zseq_undspsim, Q_2s_zseq_undspsim, Q_conditional_2s_zseq_undspsim, R_loc_zseq_undspsim, V_loc_zseq_undspsim, Q_loc_zseq_undspsim, Q_conditional_loc_zseq_undspsim, R_loc_approx_zseq_undspsim, V_loc_approx_zseq_undspsim, Q_loc_approx_zseq_undspsim, Q_conditional_loc_approx_zseq_undspsim)
+
+save(truepFDR_undspsim_0.9_ests_raw, file=file.path(project.folder, "SavedResults/truepFDR_undspsim_0.9_ests_raw_100K.Rdata"))
+# load(file=file.path(project.folder, "SavedResults/truepFDR_undspsim_0.9_ests_raw_100K.Rdata"))
+# list2env(truepFDR_undspsim_0.9_ests_raw, .GlobalEnv)
+
+
+
+mean_zseq_fun = function(x, zseq = zseq_undspsim) {
+  sapply(1:length(zseq), function(i) mean(x[,i], na.rm=TRUE))
+}
+
+E_R_1su_zseq_undspsim = mean_zseq_fun(x=R_1su_zseq_undspsim)
+E_V_1su_zseq_undspsim = mean_zseq_fun(x=V_1su_zseq_undspsim)
+FDR_1su_zseq_undspsim = mean_zseq_fun(x=Q_1su_zseq_undspsim)
+pFDR_1su_zseq_undspsim = mean_zseq_fun(x=Q_conditional_1su_zseq_undspsim)
+
+E_R_2s_zseq_undspsim = mean_zseq_fun(x=R_2s_zseq_undspsim)
+E_V_2s_zseq_undspsim = mean_zseq_fun(x=V_2s_zseq_undspsim)
+FDR_2s_zseq_undspsim = mean_zseq_fun(x=Q_2s_zseq_undspsim)
+pFDR_2s_zseq_undspsim = mean_zseq_fun(x=Q_conditional_2s_zseq_undspsim)
+
+E_R_loc_zseq_undspsim = mean_zseq_fun(x=R_loc_zseq_undspsim)
+E_V_loc_zseq_undspsim = mean_zseq_fun(x=V_loc_zseq_undspsim)
+FDR_loc_zseq_undspsim = mean_zseq_fun(x=Q_loc_zseq_undspsim)
+pFDR_loc_zseq_undspsim = mean_zseq_fun(x=Q_conditional_loc_zseq_undspsim)
+
+E_R_loc_approx_zseq_undspsim = mean_zseq_fun(x=R_loc_approx_zseq_undspsim)
+E_V_loc_approx_zseq_undspsim = mean_zseq_fun(x=V_loc_approx_zseq_undspsim)
+FDR_loc_approx_zseq_undspsim = mean_zseq_fun(x=Q_loc_approx_zseq_undspsim)
+pFDR_loc_approx_zseq_undspsim = mean_zseq_fun(x=Q_conditional_loc_approx_zseq_undspsim)
+
+
+
+## Save quantities in memory so we can use them later without running this code
+truepFDR_undspsim_0.9_ests = listNamed(zseq_undspsim, simreps, 
+                                       FDR_1su_zseq_undspsim, pFDR_1su_zseq_undspsim, 
+                                       FDR_2s_zseq_undspsim, pFDR_2s_zseq_undspsim, 
+                                       FDR_loc_zseq_undspsim, pFDR_loc_zseq_undspsim, 
+                                       FDR_loc_approx_zseq_undspsim, pFDR_loc_approx_zseq_undspsim)
+
+save(truepFDR_undspsim_0.9_ests, file=file.path(project.folder, "SavedResults/truepFDR_undspsim_0.9_ests.Rdata"))
+# load(file=file.path(project.folder, "SavedResults/truepFDR_undspsim_0.9_ests.Rdata"))
+# list2env(truepFDR_undspsim_0.9_ests, .GlobalEnv)
+
+
+```
+
+```{r Underdispersed Simulation estimates of true FDQs Results, results='hide'}
+
+## Load saved results from code chunk above rather than re-running code
+load(file=file.path(project.folder, "SavedResults/truepFDR_undspsim_0.9_ests.Rdata"))
+list2env(truepFDR_undspsim_0.9_ests, .GlobalEnv)
+
+load(file=file.path(project.folder, "SavedResults/truepFDR_undspsim_0.9_ests_raw_100K.Rdata"))
+list2env(truepFDR_undspsim_0.9_ests_raw, .GlobalEnv)
+
+```
+
+```{r Figure 6 undspsim, fig.width=7.5, fig.height=5}
+
+## ~~> Figure 6 [1su] [Undsp.Sim.] ##
+### ~~> 1-Sided Upper-Tail Area Rejection Regions Plot ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig6_1su_undspsim.png"), width=300, height=200, units='mm', res=250)
+}
+
+plot(NULL, xlim=c(min(zseq_undspsim),max(zseq_undspsim)), ylim=c(0,1), xlab='z', ylab='pFDR')
+# lines(zseq_undspsim, FDR_1su_zseq_undspsim, lty=2)
+# lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_1su_zseq_undspsim[,i], prob=0.025)), col='grey', lty=2)
+# lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_1su_zseq_undspsim[,i], prob=0.975)), col='grey', lty=2)
+lines(zseq_undspsim, pFDR_1su_zseq_undspsim, col='black', lty=1, lwd=2)
+lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_conditional_1su_zseq_undspsim[,i], prob=0.025, na.rm=T)), col='grey', lty=1, lwd=2)
+lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_conditional_1su_zseq_undspsim[,i], prob=0.975, na.rm=T)), col='grey', lty=1, lwd=2)
+if(save_figs == TRUE) {dev.off()}
+
+
+## ~~> Figure 6 [2s] [Unsp.Sim.] ##
+### ~~> 2-Sided Rejection Regions Plot ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig6_2s_undspsim.png"), width=300, height=200, units='mm', res=250)
+}
+
+plot(NULL, xlim=c(min(zseq_undspsim),max(zseq_undspsim)), ylim=c(0,1), xlab='z', ylab='pFDR')
+# lines(zseq_undspsim, FDR_2s_zseq_undspsim, lty=2)
+# lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_2s_zseq_undspsim[,i], prob=0.025)), col='grey', lty=2)
+# lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_2s_zseq_undspsim[,i], prob=0.975)), col='grey', lty=2)
+lines(zseq_undspsim, pFDR_2s_zseq_undspsim, col='black', lty=1, lwd=2)
+lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_conditional_2s_zseq_undspsim[,i], prob=0.025, na.rm=T)), col='grey', lty=1, lwd=2)
+lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_conditional_2s_zseq_undspsim[,i], prob=0.975, na.rm=T)), col='grey', lty=1, lwd=2)
+if(save_figs == TRUE) {dev.off()}
+
+
+## ~~> Figure 6 [loc] [Undsp.Sim.] ##
+### ~~> Loc FDR Simulation Estimates ##
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig6_loc_unspsim.png"), width=300, height=200, units='mm', res=250)
+}
+
+plot(NULL, xlim=c(min(zseq_undspsim), max(zseq_undspsim)), ylim=c(0,1), xlab='z', ylab='pFDR')
+lines(zseq_undspsim, FDR_loc_approx_zseq_undspsim, col='pink', lty=1, lwd=2)
+lines(zseq_undspsim, pFDR_loc_approx_zseq_undspsim, col='grey', lty=1, lwd=2)
+lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_conditional_loc_approx_zseq_undspsim[,i], prob=0.025, na.rm=T)), col='grey', lty=2, lwd=2)
+lines(zseq_undspsim, sapply(1:length(zseq_undspsim), function(i) quantile(Q_conditional_loc_approx_zseq_undspsim[,i], prob=0.975, na.rm=T)), col='grey', lty=2, lwd=2)
+
+if(save_figs == FALSE) {
+legend(2.5, 1.03, c('Local FDR (approx, delta=0.1)',
+                    'Local pFDR (approx, delta=0.1)',
+                    '95% Percentile Interval of ',
+                    '    Local pFDR (approx)'),
+       col=c('pink', 'grey', 'grey', NA),
+       lty=c(1, 1, 2, NA), bty='n', cex=0.7, y.intersp=1)
+}
+
+if(save_figs == TRUE) {
+legend(3.1, 1, c('Local FDR (approx, delta=0.1)',
+                    'Local pFDR (approx, delta=0.1)',
+                    '95% Percentile Interval of ',
+                    '    Local pFDR (approx)'),
+       col=c('pink', 'grey', 'grey', NA),
+       lty=c(1, 1, 2, NA), bty='n', cex=1, y.intersp=1)
+}
+
+if(save_figs == TRUE) {dev.off()}
+
+
+
+```
+
+
+# Illustration of Global vs Local FDR
+
+Supplemental Figure 3
+
+```{r Figure 8, fig.width=7.5, fig.height=5}
+
+#### Figure 8: Illustration of tail-area (p)FDR vs local (p)FDR
+
+m=1000
+pi0=0.85
+pi1a=0.15
+pi1b=0
+theta=2.4
+
+
+h = hist(z_sim, breaks=60, plot=F)
+d = h$breaks[2]-h$breaks[1]
+zs = seq(-6, 6, by=0.1)
+mix = pi0*dnorm(zs) + pi1a*dnorm(zs,theta,1) + pi1b*dnorm(zs,-theta,1)
+
+y1 = m*d*mix
+y2 = m*d*pi0*dnorm(zs)
+
+z_shade =  which(round(zs,2)==1.7):length(zs)
+x = zs[z_shade]
+y0 = rep(0,length(z_shade))
+
+
+
+## Global/Tail-Area
+print("Global FDR as ratio of tail area distribution")
+
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig8a.png"), width=300, height=200, units='mm', res=250)
+}
+
+plot(h, main='', border=rgb(0,0,0,0.2), yaxt='n', xaxt='n', ylab='', xlab='z-value')
+lines(zs, y1, col='blue', lwd=1.7)
+polygon(c(x, rev(x)), c(y0, rev(y1[z_shade])), col=rgb(0,0,1,0.25), border=NA)
+lines(zs, y2, col='red', lwd=1.7)
+polygon(c(x, rev(x)), c(y0, rev(y2[z_shade])), col=rgb(1,0,0,0.35), border=NA)
+
+# if(save_figs==TRUE) {
+# legend(2.5, 80,
+#        c('scaled null distribution',
+#          'mixture distribution'),
+#        col=c(rgb(0,0,1,0.3), rgb(1,0,0,0.3)),
+#        lty=c(1,1), lwd=rep(15, 2), seg.len = 0.5,
+#        bty='n', cex=1, y.intersp = 0.6)
+# }
+
+if(save_figs == TRUE) {dev.off()}
+
+
+## Local
+print("Local FDR as ratio of densities at observed z-value")
+
+if(save_figs == TRUE) {
+  png(filename = file.path(project.folder, "Figures/Fig8b.png"), width=300, height=200, units='mm', res=250)
+}
+
+plot(h, main='', border=rgb(0,0,0,0.2), yaxt='n', xaxt='n', ylab='', xlab='z-value')
+lines(zs, y1, col='blue', lwd=1.7)
+points(c(zs[z_shade[1]]), c(y1[z_shade[1]]), pch=16, col='blue')
+lines(rep(zs[z_shade[1]], 2), c(0, y1[z_shade[1]]), col=rgb(0,0,1,0.6), lwd=1.7, lty=2)
+points(c(zs[z_shade[1]]), c(y2[z_shade[1]]), pch=16, col='red')
+lines(rep(zs[z_shade[1]], 2), c(0, y2[z_shade[1]]), col=rgb(1,0,0,0.6), lwd=1.7, lty=2)
+lines(zs, y2, col='red', lwd=1.7)
+
+# if(save_figs==TRUE) {
+# legend(2.5, 80,
+#        c('scaled null distribution',
+#          'mixture distribution'),
+#        col=c(rgb(0,0,1,0.3), rgb(1,0,0,0.3)),
+#        lty=c(1,1), lwd=rep(15, 2), seg.len = 0.5,
+#        bty='n', cex=1, y.intersp = 0.6)
+# }
+
+if(save_figs == TRUE) {dev.off()}
+
+
+
+```
+
+
+
+# Empirical Bayes FDR Estimation
+
+```{r Re-load Simulation estimates of true FDQs Results}
+
+### Load simulation estimated true FDR/pFDR quantities
+load(file=file.path(project.folder, "SavedResults/truepFDR_sim_ests.Rdata"))
+list2env(truepFDR_sim_ests, .GlobalEnv)
+
+load(file=file.path(project.folder, "SavedResults/truepFDR_undspsim_0.9_ests.Rdata"))
+list2env(truepFDR_undspsim_0.9_ests, .GlobalEnv)
+
+```
+
+## Estimator 1: ECDF Estimate
+
+```{r ECDF FDR fig settings}
+
+pFDR_2s_ylab = "Two-Sided pFDR"  # "pFDR"
+pFDR_1su_ylab = "Upper-Tail pFDR" # "pFDR"
+locFDR_ylab = "Local FDR"
+
+library(colorspace)
+
+leg_lines_all = c(1,1,1,1,1,1,1,1,1,1,1,2,1,2)
+
+leg_colors_all = c('true_pFDR' = 'black', 
+                   'pFDR_a' = 'blue', # pi0 = 1
+                   'pFDR_a_unb' = lighten('#00CCFF',0.25), # lighten('blue', 0.6),  
+                   'pFDR_b' = 'purple', # pi0 = true pi0 or pi0 = est
+                   'pFDR_b_unb' = lighten('#CC99CC',0.2), # lighten('purple', 0.6), 
+                   'qvalue_a' = 'green', # pi0 = 1
+                   'qvalue_a_unb' = lighten('green', 0.5), 
+                   'qvalue_b' = 'red', # 'orange', # pi0 = true pi0 or pi0 = est
+                   'qvalue_b_unb'= 'orange',
+                   'true_locpFDR' = 'black',
+                   'locpFDR_a' = 'blue', # pi0 = 1
+                   'locpFDR_a_unb' = lighten('blue', 0.6),
+                   'locpFDR_b' = 'purple', # pi0 = true pi0 or pi0 = est
+                   'locpFDR_b_unb' = lighten('purple', 0.6))
+
+names(leg_lines_all) = names(leg_colors_all)
+
+leg_names_all_sim = c('True pFDR',  
+                      expression(paste('pFDR (',pi[0]==1,')')),
+                      expression(paste('pFDR (',pi[0]==1,'), unbounded')),
+                      expression(paste('pFDR (',pi[0]==0.85,')')),  
+                      expression(paste('pFDR (',pi[0]==0.85,'), unbounded')),
+                      expression(paste('q-value (',pi[0]==1,')')),  
+                      expression(paste('q-value (',pi[0]==1,'), unbounded')), 
+                      expression(paste('q-value (',pi[0]==0.85,')')),  
+                      expression(paste('q-value (',pi[0]==0.85,'), unbounded')),
+                      'True Local FDR',                  
+                      expression(paste('Local FDR (',pi[0]==1,')')),
+                      expression(paste('Local FDR (',pi[0]==1,'), unbounded')),
+                      expression(paste('Local FDR (',pi[0]==0.85,')')),  
+                      expression(paste('Local FDR (',pi[0]==0.85,'), unbounded')))
+
+leg_names_all_snp = c('True pFDR',  
+                      expression(paste('pFDR (',pi[0]==1,')')),
+                      expression(paste('pFDR (',pi[0]==1,'), unbounded')),
+                      expression(paste('pFDR (',pi[0],' = est)')),  
+                      expression(paste('pFDR (',pi[0],' = est), unbounded')),
+                      expression(paste('q-value (',pi[0]==1,')')),  
+                      expression(paste('q-value (',pi[0]==1,'), unbounded')), 
+                      expression(paste('q-value (',pi[0],' = est)')),  
+                      expression(paste('q-value (',pi[0],' = est), unbounded')),
+                      'True Local FDR',                  
+                      expression(paste('Local FDR (',pi[0]==1,')')),
+                      expression(paste('Local FDR (',pi[0]==1,'), unbounded')),
+                      expression(paste('Local FDR (',pi[0],' = est)')),  
+                      expression(paste('Local FDR (',pi[0],' = est), unbounded')))
+
+
+leg_names_all_undspsim = c('True pFDR',  
+                         expression(paste('pFDR (',pi[0]==1,')')),
+                         expression(paste('pFDR (',pi[0]==1,'), unbounded')),
+                         expression(paste('pFDR (',pi[0]==0.9,')')),  
+                         expression(paste('pFDR (',pi[0]==0.9,'), unbounded')),
+                         expression(paste('q-value (',pi[0]==1,')')),  
+                         expression(paste('q-value (',pi[0]==1,'), unbounded')), 
+                         expression(paste('q-value (',pi[0]==0.9,')')),  
+                         expression(paste('q-value (',pi[0]==0.9,'), unbounded')),
+                         'True Local FDR',                  
+                         expression(paste('Local FDR (',pi[0]==1,')')),
+                         expression(paste('Local FDR (',pi[0]==1,'), unbounded')),
+                         expression(paste('Local FDR (',pi[0]==0.9,')')),  
+                         expression(paste('Local FDR (',pi[0]==0.9,'), unbounded')))
+
+
+```
+
+### Underdispersed Simulation:
+
+pFDR & q-value
+
+```{r ECDF undspsim pFDR qval 2s, cache=TRUE}
+# ........................................................................
+#### ~~> ECDF | Undsp.Sim. | pFDR & q-value | 2-Sided Rejection Region ##
+# ........................................................................
+
+F0_undspsim_theoretical_2s = pnorm(-abs(z_undspsim), 0, 1) + (1 - pnorm(abs(z_undspsim), 0, 1))
+Fhat_undspsim_ecdf_2s = sapply(z_undspsim, function(zi) sum(z_undspsim <= -abs(zi) | z_undspsim >= abs(zi))/m_undspsim)
+
+
+#### pFDR Estimates for Multiple pi0 Values
+pFDR_undspsim_ecdf_2s_pr1_unbounded = 1*F0_undspsim_theoretical_2s/Fhat_undspsim_ecdf_2s
+pFDR_undspsim_ecdf_2s_pr1 = pmin(1, pFDR_undspsim_ecdf_2s_pr1_unbounded)
+
+pFDR_undspsim_ecdf_2s_pr0.9_unbounded = 0.9*F0_undspsim_theoretical_2s/Fhat_undspsim_ecdf_2s
+pFDR_undspsim_ecdf_2s_pr0.9 = pmin(1, pFDR_undspsim_ecdf_2s_pr0.9_unbounded)
+
+
+#### q-value Estimates for Multiple pi0 Values
+qval_undspsim_ecdf_2s_pr1_unbounded = qval_fun(z=z_undspsim, pFDR=pFDR_undspsim_ecdf_2s_pr1_unbounded, type='2s')
+qval_undspsim_ecdf_2s_pr1 = pmin(1, qval_undspsim_ecdf_2s_pr1_unbounded)
+
+qval_undspsim_ecdf_2s_pr0.9_unbounded = qval_fun(z=z_undspsim, pFDR=pFDR_undspsim_ecdf_2s_pr0.9_unbounded, type='2s')
+qval_undspsim_ecdf_2s_pr0.9 = pmin(1, qval_undspsim_ecdf_2s_pr0.9_unbounded)
+
+```
+
+Figure 3(a)
+
+```{r Figure 9a undspsim 2s, fig.width=5.625, fig.height=5}
+## ~~~~> Figure 9(a) ##
+## ~~~~> pfdr & qval [Undsp.Sim., 2s] 
+if(save_figs == TRUE) {
+  fn="Fig9a_2s_undspsim"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_names_all = leg_names_all_undspsim
+
+par(cex=1*mult)
+## Plot with all quantities 
+yl = c(0, max(c(pFDR_undspsim_ecdf_2s_pr1_unbounded, pFDR_undspsim_ecdf_2s_pr0.9_unbounded, 1)))
+# yl = c(0, 1)
+xl = c(min(z_undspsim), max(z_undspsim))
+# ...................................................................... 
+plot(NULL, xlab='z-value', ylab=pFDR_2s_ylab, main='ECDF Mixture \n Simulation', xlim=xl, ylim=yl)
+which_zseq = which(zseq_undspsim >= min(z_undspsim) & zseq_undspsim <= max(z_undspsim))
+lines(zseq_undspsim[which_zseq], pFDR_2s_zseq_undspsim[which_zseq], lwd=2, col=leg_colors_all['true_pFDR'])
+abline(h=0.05, lty=2, lwd=1.5, col='black')
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+# lines(z_undspsim, qval_undspsim_ecdf_2s_pr1_unbounded, lwd=3, lty=2, col=leg_colors_all['qvalue_a_unb'])
+# lines(z_undspsim, qval_undspsim_ecdf_2s_pr1, lwd=3, col=leg_colors_all['qvalue_a'])
+# lines(z_undspsim, qval_undspsim_ecdf_2s_pr0.9_unbounded, lty=2, lwd=3, col=leg_colors_all['qvalue_b_unb'])
+lines(z_undspsim, qval_undspsim_ecdf_2s_pr0.9, lwd=1.5, col=leg_colors_all['qvalue_b'])
+lines(z_undspsim, pFDR_undspsim_ecdf_2s_pr1_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_a_unb'])
+lines(z_undspsim, pFDR_undspsim_ecdf_2s_pr1, lwd=1.5, col=leg_colors_all['pFDR_a'])
+lines(z_undspsim, pFDR_undspsim_ecdf_2s_pr0.9_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_b_unb'])
+lines(z_undspsim, pFDR_undspsim_ecdf_2s_pr0.9, lwd=1.5, col=leg_colors_all['pFDR_b'])
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_a','pFDR_a_unb','pFDR_b','pFDR_b_unb','qvalue_a','qvalue_a_unb','qvalue_b','qvalue_b_unb')); xpos=3; ypos=1; y.intersp=1
+leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_a','pFDR_a_unb','pFDR_b','qvalue_b')); xpos=xl[2]-3.7; ypos=1; y.intersp=1
+## w/out q-values
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_a','pFDR_a_unb','pFDR_b','pFDR_b_unb'));   xpos=2.1; ypos=yl[2]+0.07; y.intersp=0.35
+## w/out q-values and unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_a','pFDR_b'));   xpos=2.7; ypos=yl[2]+0.07; y.intersp=0.4
+## q-values only:
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','qvalue_a','qvalue_a_unb','qvalue_b','qvalue_b_unb'));   xpos=2.1; ypos=yl[2]+0.07; y.intersp=0.35
+
+leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all[leg_which]
+
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+
+Local FDR
+
+```{r ECDF undspsim local, cache=TRUE}
+# ................. #
+##### ~~> ECDF | Undsp.Sim. | Local FDR ##
+# ................. #
+
+K = 100
+
+#### Local FDR Estimates for Multiple pi0 Values 
+locpFDR_undspsim_ecdf_pr1_unbounded = loc_nonpar_appr(z_undspsim, K=K, pi0=1, m=m_undspsim, plot=F)$'loc_fdr'
+locpFDR_undspsim_ecdf_pr1 = pmin(1, locpFDR_undspsim_ecdf_pr1_unbounded)
+
+locpFDR_undspsim_ecdf_pr0.9_unbounded = loc_nonpar_appr(z_undspsim, K=K, pi0=0.9, m=m_undspsim, plot=F)$'loc_fdr'
+locpFDR_undspsim_ecdf_pr0.9 = pmin(1, locpFDR_undspsim_ecdf_pr0.9_unbounded)
+
+```
+
+Figure 3(c) 
+
+```{r Figure 11a undspsim local, fig.width=5.625, fig.height=5}
+## ~~~~> Figure 11(a) ##
+## ~~~~> loc. fdr [Undsp.Sim.]
+if(save_figs == TRUE) {
+  fn="Fig11a_undspsim"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_names_all = leg_names_all_undspsim
+
+par(cex=1*mult)
+## Plot with all quantities
+yl = c(0, max(c(locpFDR_undspsim_ecdf_pr1_unbounded, locpFDR_undspsim_ecdf_pr0.9_unbounded)))
+# yl = c(0, 1)
+xl = c(min(z_undspsim), max(z_undspsim))
+# ...................................................................... 
+plot(NULL, xlab='z-value', ylab=locFDR_ylab, main='ECDF-type Mixture \n Simulation', xlim=xl, ylim=yl)
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+which_zseq = which(zseq_undspsim >= min(z_undspsim) & zseq_undspsim <= max(z_undspsim))
+lines(zseq_undspsim[which_zseq], pFDR_loc_approx_zseq_undspsim[which_zseq], lwd=2, col=leg_colors_all['true_locpFDR'])
+lines(z_undspsim, locpFDR_undspsim_ecdf_pr1_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_a_unb'])
+lines(z_undspsim, locpFDR_undspsim_ecdf_pr1, lwd=2, col=leg_colors_all['locpFDR_a'])
+lines(z_undspsim, locpFDR_undspsim_ecdf_pr0.9_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_b_unb'])
+lines(z_undspsim, locpFDR_undspsim_ecdf_pr0.9, lwd=2, col=leg_colors_all['locpFDR_b'])
+abline(h=0.05, lty=2, lwd=1.5)
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+leg_which = which(names(leg_colors_all) %in% c('true_locpFDR','locpFDR_a','locpFDR_a_unb','locpFDR_b','locpFDR_b_unb')); xpos=xl[2]-4.5; ypos=yl[2]+0.11; y.intersp=1
+## w/out unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('true_locpFDR','locpFDR_a','locpFDR_b'));   xpos=2.5; ypos=yl[2]+0.07; y.intersp=0.3
+
+leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all[leg_which]
+
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+
+```{r}
+# ......................................... # // End Underdispersed Sim.
+```
+
+
+### Real World Example: 
+
+
+pFDR & q-value
+
+```{r ECDF snp pFDR qval 2s, cache = TRUE, dependson=c("snp opts")}
+if(run_snp_ex==TRUE) {
+# ........................................................................
+#### ~~> ECDF | SNP | pFDR & q-value | 2-Sided Rejection Region ## 
+# ........................................................................
+
+F0_snp_theoretical_2s = pnorm(-abs(z_snp), 0, 1) + (1 - pnorm(abs(z_snp), 0, 1))
+Fhat_snp_ecdf_2s = sapply(z_snp, function(zi) sum(z_snp <= -abs(zi) | z_snp >= abs(zi))/m_snp)
+
+#### pFDR Estimates for Multiple pi0 Values
+pFDR_snp_ecdf_2s_pr1_unbounded = 1*F0_snp_theoretical_2s/Fhat_snp_ecdf_2s
+pFDR_snp_ecdf_2s_pr1 = pmin(1, pFDR_snp_ecdf_2s_pr1_unbounded)
+
+#### q-value Estimates for Multiple pi0 Values 
+qval_snp_ecdf_2s_pr1_unbounded = qval_fun(z=z_snp, pFDR=pFDR_snp_ecdf_2s_pr1_unbounded, type='2s')
+qval_snp_ecdf_2s_pr1 = pmin(1, qval_snp_ecdf_2s_pr1_unbounded)
+
+}
+```
+
+Figure 3(b) 
+
+```{r Figure 9b snp 2s, fig.width=5.625, fig.height=5}
+if(run_snp_ex==TRUE) {
+## ~~~~> Figure 9(b) ##
+## ~~~~> pfdr & qval [SNP, 2s] 
+if(save_figs == TRUE) {
+  fn="Fig9b_2s_snp"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_names_all = leg_names_all_snp
+
+par(cex=1*mult)
+yl = c(0, max(c(pFDR_snp_ecdf_2s_pr1_unbounded, 1)))
+# yl = c(0, 1)
+xl = c(min(z_snp), max(z_snp))
+# ...................................................................... 
+plot(NULL, xlab='z-value', ylab=pFDR_2s_ylab, main='ECDF Mixture \n SNP', xlim=xl, ylim=yl)
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+# lines(z_snp, qval_snp_ecdf_2s_pr1_unbounded, lwd=3, lty=2, col=leg_colors_all['qvalue_a_unb'])
+lines(z_snp, qval_snp_ecdf_2s_pr1, lwd=3, col=leg_colors_all['qvalue_a'])
+lines(z_snp, pFDR_snp_ecdf_2s_pr1_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_a_unb'])
+lines(z_snp, pFDR_snp_ecdf_2s_pr1, lwd=1.5, col=leg_colors_all['pFDR_a'])
+abline(h=0.05, lty=2, lwd=1.5, col='black')
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+leg_which = which(names(leg_colors_all) %in% c('pFDR_a','pFDR_a_unb','qvalue_a')); xpos=xl[2]-4.05; ypos=1; y.intersp=1
+## w/out q-values
+# leg_which = which(names(leg_colors_all) %in% c('pFDR_a','pFDR_a_unb'));   xpos=2.8; ypos=yl[2]+0.06; y.intersp=0.4
+## w/out q-values and unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('pFDR_a'));   xpos=2.8; ypos=yl[2]+0.06; y.intersp=0.4
+## q-values only:
+# leg_which = which(names(leg_colors_all) %in% c('qvalue_a','qvalue_a_unb'));   xpos=2.8; ypos=yl[2]+0.06; y.intersp=0.4
+
+leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all[leg_which]
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.99, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+}
+```
+
+
+Local FDR
+
+```{r ECDF snp local, cache = TRUE, dependson=c("snp opts")}
+if(run_snp_ex==TRUE) {
+# ................. #
+##### ~~> ECDF | SNP | Local FDR ##
+# ................. #
+
+K = 100
+
+#### Local pFDR Estimates for Multiple pi0 Values
+locpFDR_snp_ecdf_pr1_unbounded = loc_nonpar_appr(z_snp, K=K, pi0=1, m=m_snp, plot=F)$'loc_fdr'
+locpFDR_snp_ecdf_pr1 = pmin(1, locpFDR_snp_ecdf_pr1_unbounded)
+
+}
+```
+
+Figure 3(d)
+
+```{r Figure 11b snp local, fig.width=5.625, fig.height=5}
+if(run_snp_ex==TRUE) {
+## ~~~~> Figure 11(b) ##
+## ~~~~> loc. fdr [SNP]
+if(save_figs == TRUE) {
+  fn="Fig11b_local_snp"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_names_all = leg_names_all_snp
+
+par(cex=1*mult)
+## Plot with all quantities
+yl = c(0, max(c(locpFDR_snp_ecdf_pr1_unbounded)))
+# yl = c(0, 1)
+xl = c(min(z_snp), max(z_snp))
+# ......................................................................
+plot(NULL, xlab='z-value', ylab=locFDR_ylab, main='ECDF-type Mixture \n SNP', xlim=xl, ylim=yl)
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+lines(z_snp, locpFDR_snp_ecdf_pr1_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_a_unb'])
+lines(z_snp, locpFDR_snp_ecdf_pr1, lwd=2, col=leg_colors_all['locpFDR_a'])
+abline(h=0.05, lty=2, lwd=1.5)
+
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+leg_which = which(names(leg_colors_all) %in% c('locpFDR_a','locpFDR_a_unb')); xpos=xl[1]-0.1; ypos=yl[2]+0.03; y.intersp=1
+## w/out unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('locpFDR_a'));   xpos=3.9; ypos=1+0.06; y.intersp=0.4
+
+leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all[leg_which]
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+}
+```
+
+
+```{r}
+# ......................................... # // End SNP
+```
+
+
+
+
+
+## Estimator 2: Lindsey's Method Estimate
+
+```{r Lindseys FDR fig settings}
+
+pFDR_2s_ylab = "Two-Sided pFDR"  # "pFDR"
+pFDR_1su_ylab = "Upper-Tail pFDR" # "pFDR"
+locFDR_ylab = "Local FDR"
+
+library(colorspace)
+
+leg_lines_all = c(1,1,1,1,1,1,1,1,1,1,1,2,1,2)
+
+leg_colors_all = c('true_pFDR' = 'black', 
+                   'pFDR_a' = 'blue', # pi0 = 1
+                   'pFDR_a_unb' = lighten('#00CCFF',0.25), # lighten('blue', 0.6),  
+                   'pFDR_b' = 'purple', # pi0 = true pi0 or pi0 = est
+                   'pFDR_b_unb' = lighten('#CC99CC',0.2), # lighten('purple', 0.6), 
+                   'qvalue_a' = 'green', # pi0 = 1
+                   'qvalue_a_unb' = lighten('green', 0.5), 
+                   'qvalue_b' = 'red', # 'orange', # pi0 = true pi0 or pi0 = est
+                   'qvalue_b_unb'= 'orange',
+                   'true_locpFDR' = 'black',
+                   'locpFDR_a' = 'blue', # pi0 = 1
+                   'locpFDR_a_unb' = lighten('blue', 0.6),
+                   'locpFDR_b' = 'purple', # pi0 = true pi0 or pi0 = est
+                   'locpFDR_b_unb' = lighten('purple', 0.6))
+
+names(leg_lines_all) = names(leg_colors_all)
+
+leg_names_all_sim = c('True pFDR',  
+                      expression(paste('pFDR (',pi[0]==1,')')),
+                      expression(paste('pFDR (',pi[0]==1,'), unbounded')),
+                      expression(paste('pFDR (',pi[0]==0.85,')')),  
+                      expression(paste('pFDR (',pi[0]==0.85,'), unbounded')),
+                      expression(paste('q-value (',pi[0]==1,')')),  
+                      expression(paste('q-value (',pi[0]==1,'), unbounded')), 
+                      expression(paste('q-value (',pi[0]==0.85,')')),  
+                      expression(paste('q-value (',pi[0]==0.85,'), unbounded')),
+                      'True Local FDR',                  
+                      expression(paste('Local FDR (',pi[0]==1,')')),
+                      expression(paste('Local FDR (',pi[0]==1,'), unbounded')),
+                      expression(paste('Local FDR (',pi[0]==0.85,')')),  
+                      expression(paste('Local FDR (',pi[0]==0.85,'), unbounded')))
+
+leg_names_all_snp = c('True pFDR',  
+                      expression(paste('pFDR (',pi[0]==1,')')),
+                      expression(paste('pFDR (',pi[0]==1,'), unbounded')),
+                      expression(paste('pFDR (',pi[0],' = est)')),  
+                      expression(paste('pFDR (',pi[0],' = est), unbounded')),
+                      expression(paste('q-value (',pi[0]==1,')')),  
+                      expression(paste('q-value (',pi[0]==1,'), unbounded')), 
+                      expression(paste('q-value (',pi[0],' = est)')),  
+                      expression(paste('q-value (',pi[0],' = est), unbounded')),
+                      'True Local FDR',                  
+                      expression(paste('Local FDR (',pi[0]==1,')')),
+                      expression(paste('Local FDR (',pi[0]==1,'), unbounded')),
+                      expression(paste('Local FDR (',pi[0],' = est)')),  
+                      expression(paste('Local FDR (',pi[0],' = est), unbounded')))
+
+leg_names_all_undspsim = c('True pFDR',  
+                         expression(paste('pFDR (',pi[0]==1,')')),
+                         expression(paste('pFDR (',pi[0]==1,'), unbounded')),
+                         expression(paste('pFDR (',pi[0]==0.9,')')),  
+                         expression(paste('pFDR (',pi[0]==0.9,'), unbounded')),
+                         expression(paste('q-value (',pi[0]==1,')')),  
+                         expression(paste('q-value (',pi[0]==1,'), unbounded')), 
+                         expression(paste('q-value (',pi[0]==0.9,')')),  
+                         expression(paste('q-value (',pi[0]==0.9,'), unbounded')),
+                         'True Local FDR',                  
+                         expression(paste('Local FDR (',pi[0]==1,')')),
+                         expression(paste('Local FDR (',pi[0]==1,'), unbounded')),
+                         expression(paste('Local FDR (',pi[0]==0.9,')')),  
+                         expression(paste('Local FDR (',pi[0]==0.9,'), unbounded')))
+
+
+```
+
+### Underdispersed Simulation
+
+```{r Lindseys mixture fit undspsim, cache=TRUE}
+
+# ......................................... #
+########### > Underdispersed Simulation ## 
+# ......................................... #
+
+K_linds_undspsim = 100  
+J_linds_undspsim = 7   
+
+h_undspsim = hist(z_undspsim, breaks=seq(min(z_undspsim)-0.01, max(z_undspsim)+0.01, length=K_linds_undspsim), plot=F, freq=T)
+delta_undspsim = mean(sapply(2:length(h_undspsim$breaks), function(i) h_undspsim$breaks[i]-h_undspsim$breaks[i-1]))/2
+scale_undspsim = m_undspsim*(2*delta_undspsim)
+Zk = h_undspsim$breaks
+yk = h_undspsim$counts
+xk = h_undspsim$mids
+
+# fit_undspsim = glm(yk ~ poly(xk, J_linds_undspsim, raw=T), family="poisson")
+fit_undspsim = glm(yk ~ splines::ns(xk, df=J_linds_undspsim), family="poisson")
+
+fhat_undspsim_fun = function(x) {
+  yhat = predict(fit_undspsim, newdata = data.frame(xk = x), type = 'response')
+  fhat = yhat/scale_undspsim
+  return(fhat)
+}
+
+
+f0_undspsim_theoretical = dnorm(z_undspsim, 0, 1)
+
+fhat_undspsim_lindseys = fhat_undspsim_fun(z_undspsim)
+
+Fhat_undspsim_lindseys_2s = sapply(1:length(z_undspsim), function(i) {
+  integrate(fhat_undspsim_fun, lower=-Inf, upper=-abs(z_undspsim[i]))$value +
+    integrate(fhat_undspsim_fun, lower=abs(z_undspsim[i]), upper=Inf)$value
+})
+
+
+```
+
+Supplemental Figure 5(a)
+
+```{r Figure 12a undspsim, fig.width=5.625, fig.height=5}
+# ~~~~> Figure 12(a) ##
+## ~~~~> Lindsey's Method Mixture Histogram & Density [Undsp.Sim.]
+if(save_figs == TRUE) {
+  fn="Fig12a_undspsim"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+par(cex=1*mult)
+plot(h_undspsim, main="Simulation", xlab='Z', ylab='Density', freq=FALSE)
+# scaled estimate pi0*f0(z)
+# lines(z_undspsim, 1*f0_undspsim_theoretical, lty=1, lwd=2, col='red')
+# true mixture
+lines(z_undspsim, (pi0_undspsim*dnorm(z_undspsim, 0, 0.9) + (1-pi0_undspsim)/3*(dnorm(z_undspsim, 0.3, 0.9) + dnorm(z_undspsim, 1, 0.9) + dnorm(z_undspsim, 3, 0.9))), lty=1, lwd=2, col='black' )
+# estimate for mixture using Lindsey's method
+lines(z_undspsim, fhat_undspsim_lindseys, lty=1, lwd=2, col='purple')
+
+if(save_figs==TRUE & add_leg==TRUE) {
+legend('topright', 
+       c(# 'Theoretical null', 
+         'Estimated mixture'
+         , 'True mixture'
+       ), 
+       col=c(# 'red',
+         'purple','black'), 
+       lty=c(1,1), lwd=c(1,1)*mult^2, bty='n', y.intersp=1, cex=1/mult/0.95)
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+  
+```
+
+pFDR & q-value
+
+```{r Lindseys undspsim pFDR qval 2s, cache=TRUE}
+
+# ....................................................
+#### ~~> Lindsey's | Undsp.Sim. | pFDR & q-value | 2-Sided Rejection Region ##  
+# ....................................................
+
+# F0_undspsim_theoretical_2s
+# Fhat_undspsim_lindseys_2s
+
+
+#### pFDR Estimates for Multiple pi0 Values
+pFDR_undspsim_lindseys_2s_pr1_unbounded = 1*F0_undspsim_theoretical_2s/Fhat_undspsim_lindseys_2s
+pFDR_undspsim_lindseys_2s_pr1 = pmin(1, pFDR_undspsim_lindseys_2s_pr1_unbounded)
+
+pFDR_undspsim_lindseys_2s_pr0.9_unbounded = 0.9*F0_undspsim_theoretical_2s/Fhat_undspsim_lindseys_2s
+pFDR_undspsim_lindseys_2s_pr0.9 = pmin(1, pFDR_undspsim_lindseys_2s_pr0.9_unbounded)
+
+
+#### q-value Estimates for Multiple pi0 Values
+qval_undspsim_lindseys_2s_pr1_unbounded = qval_fun(z=z_undspsim, pFDR=pFDR_undspsim_lindseys_2s_pr1_unbounded, type='2s')
+qval_undspsim_lindseys_2s_pr1 = pmin(1, qval_undspsim_lindseys_2s_pr1_unbounded)
+
+qval_undspsim_lindseys_2s_pr0.9_unbounded = qval_fun(z=z_undspsim, pFDR=pFDR_undspsim_lindseys_2s_pr0.9_unbounded, type='2s')
+qval_undspsim_lindseys_2s_pr0.9 = pmin(1, qval_undspsim_lindseys_2s_pr0.9_unbounded)
+
+```
+
+Figure 5(a)
+
+```{r Figure 13a undspsim 2s, fig.width=5.625, fig.height=5}
+## ~~~~> Figure 13(a) ##
+## ~~~~> pfdr & qval [Undsp.Sim., 2s] 
+if(save_figs == TRUE) {
+  fn="Fig13a_2s_undspsim"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_names_all = leg_names_all_undspsim
+
+par(cex=1*mult)
+# yl = c(0, max(c(pFDR_undspsim_lindseys_2s_pr1_unbounded, pFDR_undspsim_lindseys_2s_pr0.9_unbounded, 1)))
+yl = c(0, max(c(pFDR_undspsim_lindseys_2s_pr1_unbounded, pFDR_undspsim_lindseys_2s_pr0.9_unbounded, pFDR_undspsim_ecdf_2s_pr1, pFDR_undspsim_ecdf_2s_pr0.9, 1)))
+# yl = c(0, 1)
+xl = c(min(z_undspsim), max(z_undspsim))
+# ...................................................................... 
+plot(NULL, xlab='z-value', ylab=pFDR_2s_ylab, main="Lindsey's Method Mixture \n Simulation", xlim=xl, ylim=yl)
+
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+
+which_zseq = which(zseq_undspsim >= min(z_undspsim) & zseq_undspsim <= max(z_undspsim))
+lines(zseq_undspsim[which_zseq], pFDR_2s_zseq_undspsim[which_zseq], lwd=2, col=leg_colors_all['true_pFDR'])
+
+lines(z_undspsim, pFDR_undspsim_ecdf_2s_pr1_unbounded, lty=1, lwd=1.5, col='#CCCCCC')
+lines(z_undspsim, pFDR_undspsim_ecdf_2s_pr0.9_unbounded, lty=1, lwd=1.5, col=lighten('#FF3399',0.4))
+
+
+# lines(z_undspsim, qval_undspsim_lindseys_2s_pr1_unbounded, lwd=3, lty=2, col=leg_colors_all['qvalue_a_unb'])
+# lines(z_undspsim, qval_undspsim_lindseys_2s_pr1, lwd=3, col=leg_colors_all['qvalue_a'])
+# lines(z_undspsim, qval_undspsim_lindseys_2s_pr0.9_unbounded, lty=2, lwd=3, col=leg_colors_all['qvalue_b_unb'])
+# lines(z_undspsim, qval_undspsim_lindseys_2s_pr0.9, lwd=1.5, col=leg_colors_all['qvalue_b'])
+
+lines(z_undspsim, pFDR_undspsim_lindseys_2s_pr1_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_a_unb'])
+lines(z_undspsim, pFDR_undspsim_lindseys_2s_pr1, lwd=1.5, col=leg_colors_all['pFDR_a'])
+# lines(z_undspsim, pFDR_undspsim_lindseys_2s_pr0.9_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_b_unb'])
+lines(z_undspsim, pFDR_undspsim_lindseys_2s_pr0.9, lwd=1.5, col=leg_colors_all['pFDR_b'])
+abline(h=0.05, lty=2, lwd=1.5, col='black')
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_a','pFDR_a_unb','pFDR_b','pFDR_b_unb','qvalue_a','qvalue_a_unb','qvalue_b','qvalue_b_unb')); xpos=xl[2]-3.65; ypos=0.99 ; y.intersp=1
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_a','pFDR_a_unb','pFDR_b','pFDR_b_unb','qvalue_b')); xpos=xl[2]-3.65; ypos=0.99; y.intersp=1
+## w/out q-values
+leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_a','pFDR_a_unb','pFDR_b')); xpos=xl[2]-3.75; ypos=1; y.intersp=1
+## w/out q-values and unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_a','pFDR_b'));   xpos=1.8; ypos=yl[2]+0.06; y.intersp=0.4
+## q-values only:
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','qvalue_a','qvalue_a_unb','qvalue_b','qvalue_b_unb'));   xpos=2.1; ypos=yl[2]+0.07; y.intersp=0.35
+
+# leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all[leg_which]
+# w/ some ECDF estimates added:
+leg_colors=c(leg_colors_all[leg_which], '#CCCCCC', lighten('#FF3399',0.4)); leg_names=c(leg_names_all[leg_which], expression(paste('pFDR (', pi[0] == 1,'), ECDF est.')), expression(paste("pFDR (", pi[0] == 0.9,'), ECDF est.'))); leg_lines=c(leg_lines_all[leg_which], 1, 1)
+
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+Local FDR
+
+```{r Lindseys undspsim local, cache=TRUE}
+
+# .......................................
+##### ~~> Lindsey's | Undsp.Sim. | Local FDR ##
+# .......................................
+
+# f0_undspsim_theoretical
+# fhat_undspsim_lindseys 
+
+
+#### Local pFDR Estimates for Multiple pi0 Values 
+locpFDR_undspsim_lindseys_pr1_unbounded = 1*f0_undspsim_theoretical/fhat_undspsim_lindseys
+locpFDR_undspsim_lindseys_pr1 = pmin(1, locpFDR_undspsim_lindseys_pr1_unbounded)
+
+locpFDR_undspsim_lindseys_pr0.9_unbounded = 0.9*f0_undspsim_theoretical/fhat_undspsim_lindseys
+locpFDR_undspsim_lindseys_pr0.9 = pmin(1, locpFDR_undspsim_lindseys_pr0.9_unbounded)
+
+```
+
+Figure 5(c)
+
+```{r Figure 13c undspsim local, fig.width=5.625, fig.height=5}
+## ~~~~> Figure 13(c) ##
+## ~~~~> loc. pfdr [Sim.] 
+if(save_figs == TRUE) {
+  fn="Fig13c_local_undspsim"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_names_all = leg_names_all_undspsim
+
+par(cex=1*mult)
+## Plot with all quantities
+# yl = c(0, max(c(locpFDR_undspsim_lindseys_pr1_unbounded, locpFDR_undspsim_lindseys_pr0.9_unbounded)))
+yl = c(0, max(c(locpFDR_undspsim_lindseys_pr1_unbounded, locpFDR_undspsim_lindseys_pr0.9_unbounded, locpFDR_undspsim_ecdf_pr1_unbounded, locpFDR_undspsim_ecdf_pr0.9_unbounded)))
+# yl = c(0, 1)
+xl = c(min(z_undspsim), max(z_undspsim))
+# ...................................................................... 
+plot(NULL, xlab='z-value', ylab=locFDR_ylab, main="Lindsey's Method Mixture \n Simulation", xlim=xl, ylim=yl)
+
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+
+which_zseq = which(zseq_undspsim >= min(z_undspsim) & zseq_undspsim <= max(z_undspsim))
+lines(zseq_undspsim[which_zseq], pFDR_loc_approx_zseq_undspsim[which_zseq], lwd=2, col=leg_colors_all['true_locpFDR'])
+# lines(zseq_undspsim[which_zseq], pFDR_loc_zseq_undspsim[which_zseq], lwd=2, col=leg_colors_all['true_locpFDR'])
+
+lines(z_undspsim, locpFDR_undspsim_ecdf_pr1_unbounded, lty=1, lwd=1, col='#CCCCCC')
+lines(z_undspsim, locpFDR_undspsim_ecdf_pr0.9_unbounded, lty=1, lwd=1, col=lighten('#FF3399',0.4))
+
+lines(z_undspsim, locpFDR_undspsim_lindseys_pr1_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_a_unb'])
+lines(z_undspsim, locpFDR_undspsim_lindseys_pr1, lwd=2, col=leg_colors_all['locpFDR_a'])
+lines(z_undspsim, locpFDR_undspsim_lindseys_pr0.9_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_b_unb'])
+lines(z_undspsim, locpFDR_undspsim_lindseys_pr0.9, lwd=2, col=leg_colors_all['locpFDR_b'])
+
+abline(h=0.05, lty=2, lwd=1.5)
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+leg_which = which(names(leg_colors_all) %in% c('true_locpFDR','locpFDR_a','locpFDR_a_unb','locpFDR_b','locpFDR_b_unb'));   xpos=xl[2]-4.5; ypos=yl[2]+0.06; y.intersp=1
+## w/out unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('true_locpFDR','locpFDR_a','locpFDR_b'));   xpos=1.8; ypos=yl[2]+0.07; y.intersp=0.4
+
+
+# leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all[leg_which]
+# w/ some ECDF estimates added:
+leg_colors=c(leg_colors_all[leg_which], '#CCCCCC', lighten('#FF3399',0.4)); leg_names=c(leg_names_all[leg_which], expression(paste('Local FDR (', pi[0] == 1,'), ECDF est.')), expression(paste("Local FDR (", pi[0] == 0.9,'), ECDF est.'))); leg_lines=c(leg_lines_all[leg_which], 1, 1)
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+```{r}
+# ......................................... # // End Underdispersed Sim.
+```
+
+### Real World Example:
+
+```{r Lindseys mixture fit snp, cache = TRUE, dependson=c("snp opts")}
+if(run_snp_ex==TRUE) {
+
+K_linds_snp = 100  
+J_linds_snp = 5 
+
+h_snp = hist(z_snp, breaks=seq(min(z_snp)-0.01, max(z_snp)+0.01, length=K_linds_snp), plot=F, freq=T)
+delta_snp = mean(sapply(2:length(h_snp$breaks), function(i) h_snp$breaks[i]-h_snp$breaks[i-1]))/2
+scale_snp = m_snp*(2*delta_snp)
+Zk = h_snp$breaks
+yk = h_snp$counts
+xk = h_snp$mids
+
+# fit_snp = glm(yk ~ poly(xk, J_linds_snp, raw=T), family="poisson")
+fit_snp = glm(yk ~ splines::ns(xk, df=J_linds_snp), family="poisson")
+
+fhat_snp_fun = function(x) {
+  yhat = predict(fit_snp, newdata = data.frame(xk = x), type = 'response')
+  fhat = yhat/scale_snp
+  return(fhat)
+}
+
+f0_snp_theoretical = dnorm(z_snp, 0, 1)
+fhat_snp_lindseys = fhat_snp_fun(z_snp)
+
+Fhat_snp_lindseys_2s = sapply(1:length(z_snp), function(i) {
+  integrate(fhat_snp_fun, lower=-Inf, upper=-abs(z_snp[i]))$value +
+    integrate(fhat_snp_fun, lower=abs(z_snp[i]), upper=Inf)$value
+})
+
+
+}
+```
+
+Supplemental Figure 5(b)
+
+```{r Figure 12b snp, fig.width=5.625, fig.height=5}
+if(run_snp_ex==TRUE) {
+
+# ~~~~> Figure 12(b) ##
+## ~~~~> Lindsey's Method Mixture Histogram & Density [SNP]
+if(save_figs == TRUE) {
+  fn="Fig12b_snp"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ......................................................................
+par(cex=1*mult)
+plot(h_snp, main="SNP", xlab='Z', ylab='Density', freq=FALSE)
+# scaled estimate pi0*f0(z)
+# lines(z_snp, 1*f0_snp_theoretical, lty=1, lwd=2, col='red')
+# estimate for mixture using Lindsey's method
+lines(z_snp, fhat_snp_lindseys, lty=1, lwd=2, col='purple')
+
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# legend('topright', c('Theoretical null', 'Estimated mixture'), col=c('red','purple'), lty=c(1,1), lwd=c(1,1)*mult^2, bty='n', y.intersp=1, cex=1/mult/0.95)
+legend('topright', c('Estimated mixture'), col=c('purple'), lty=c(1), lwd=c(1)*mult^2, bty='n', y.intersp=1, cex=1/mult/0.95)
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+}
+```
+
+
+pFDR & q-value
+
+```{r Lindseys snp pFDR qval 2s, cache = TRUE, dependson=c("snp opts")}
+if(run_snp_ex==TRUE) {
+# ....................................................
+#### ~~> Lindsey's | SNP | pFDR & q-value | 2-Sided Rejection Region ##  
+# ....................................................
+
+# F0_snp_theoretical_2s
+# Fhat_snp_lindseys_2s 
+
+#### pFDR Estimates for Multiple pi0 Values
+pFDR_snp_lindseys_2s_pr1_unbounded = 1*F0_snp_theoretical_2s/Fhat_snp_lindseys_2s
+pFDR_snp_lindseys_2s_pr1 = pmin(1, pFDR_snp_lindseys_2s_pr1_unbounded)
+
+#### q-value Estimates for Multiple pi0 Values
+qval_snp_lindseys_2s_pr1_unbounded = qval_fun(z=z_snp, pFDR=pFDR_snp_lindseys_2s_pr1_unbounded, type='2s')
+qval_snp_lindseys_2s_pr1 = pmin(1, qval_snp_lindseys_2s_pr1_unbounded)
+
+}
+```
+
+Figure 5(b)
+
+```{r Figure 13b snp 2s, fig.width=5.625, fig.height=5}
+if(run_snp_ex==TRUE) {
+## ~~~~> Figure 13(b) ##
+## ~~~~> pfdr & qval [SNP, 2s] 
+if(save_figs == TRUE) {
+  fn="Fig13b_2s_snp"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_names_all = leg_names_all_snp
+
+par(cex=1*mult)
+yl = c(0, max(c(pFDR_snp_lindseys_2s_pr1_unbounded, pFDR_snp_ecdf_2s_pr1, 1)))
+# yl = c(0, 1)
+xl = c(min(z_snp), max(z_snp))
+# ...................................................................... 
+plot(NULL, xlab='z-value', ylab=pFDR_2s_ylab, main="Lindsey's Method Mixture \n SNP", xlim=xl, ylim=yl)
+
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+
+lines(z_snp, pFDR_snp_ecdf_2s_pr1, lty=1, lwd=1.5, col='#CCCCCC')
+
+# lines(z_snp, qval_snp_lindseys_2s_pr1_unbounded, lwd=3, lty=2, col=leg_colors_all['qvalue_a_unb'])
+# lines(z_snp, qval_snp_lindseys_2s_pr1, lwd=3, col=leg_colors_all['qvalue_a'])
+lines(z_snp, pFDR_snp_lindseys_2s_pr1_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_a_unb'])
+lines(z_snp, pFDR_snp_lindseys_2s_pr1, lwd=1.5, col=leg_colors_all['pFDR_a'])
+abline(h=0.05, lty=2, lwd=1.5, col='black')
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+# leg_which = which(names(leg_colors_all) %in% c('pFDR_a','pFDR_a_unb','qvalue_a','qvalue_a_unb'));   xpos=2.8; ypos=yl[2]+0.06; y.intersp=0.4
+## w/out q-values
+leg_which = which(names(leg_colors_all) %in% c('pFDR_a','pFDR_a_unb')); xpos=xl[2]-4.1; ypos=1; y.intersp=1  # c('pFDR_a','pFDR_a_unb')
+## w/out q-values and unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('pFDR_a'));   xpos=2.6; ypos=yl[2]+0.06; y.intersp=0.4
+## q-values only:
+# leg_which = which(names(leg_colors_all) %in% c('qvalue_a','qvalue_a_unb'));   xpos=2.8; ypos=yl[2]+0.06; y.intersp=0.4
+
+leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all[leg_which]
+# w/ some ECDF estimates added:
+leg_colors=c(leg_colors_all[leg_which], '#CCCCCC'); leg_names=c(leg_names_all[leg_which], expression(paste('pFDR (', pi[0] == 1,'), ECDF est.'))) # , expression(paste('q-value (', pi[0] == 1,'), ECDF mixture est.'));
+  leg_lines=c(leg_lines_all[leg_which], 1)
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.99, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+}
+```
+
+
+Local FDR
+
+```{r Lindseys snp local, cache = TRUE, dependson=c("snp opts")}
+if(run_snp_ex==TRUE) {
+# .......................................
+##### ~~> Lindsey's | SNP | Local FDR ## 
+# .......................................
+
+# f0_snp_theoretical
+# fhat_snp_lindseys 
+  
+#### Local pFDR Estimates for Multiple pi0 Values 
+locpFDR_snp_lindseys_pr1_unbounded = 1*f0_snp_theoretical/fhat_snp_lindseys
+locpFDR_snp_lindseys_pr1 = pmin(1, locpFDR_snp_lindseys_pr1_unbounded)
+
+
+}
+```
+
+Figure 5(d)
+
+```{r Figure 13d snp local, fig.width=5.625, fig.height=5}
+if(run_snp_ex==TRUE) {
+## ~~~~> Figure 13(d) ##
+## ~~~~> loc. fdr [SNP] 
+if(save_figs == TRUE) {
+  fn="Fig13d_local_snp"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_names_all = leg_names_all_snp
+
+leg_lines_all_edit = leg_lines_all
+leg_lines_all_edit[which(names(leg_colors_all) %in% c('locpFDR_a_unb'))] = 1
+
+
+par(cex=1*mult)
+## Plot w ith all quantities
+# yl = c(0, max(c(locpFDR_snp_lindseys_pr1_unbounded, 1)))
+yl = c(0, max(c(locpFDR_snp_lindseys_pr1_unbounded, locpFDR_snp_ecdf_pr1_unbounded)))
+# yl = c(0, 1)
+xl = c(min(z_snp), max(z_snp))
+# ...................................................................... 
+plot(NULL, xlab='z-value', ylab=locFDR_ylab, main="Lindsey's Method Mixture \n SNP", xlim=xl, ylim=yl)
+
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+
+lines(z_snp, locpFDR_snp_ecdf_pr1_unbounded, lty=1, lwd=1, col='#CCCCCC')
+lines(z_snp, locpFDR_snp_lindseys_pr1_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_a_unb'])
+lines(z_snp, locpFDR_snp_lindseys_pr1, lwd=2, col=leg_colors_all['locpFDR_a'])
+abline(h=0.05, lty=2, lwd=1.5)
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+leg_which = which(names(leg_colors_all) %in% c('locpFDR_a','locpFDR_a_unb')); xpos=xl[1]-0.03; ypos=yl[2]+0.08; y.intersp=1
+## w/out unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('locpFDR_a'));   xpos=3.2; ypos=yl[2]+0.07; y.intersp=0.4
+
+# leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all_edit[leg_which]
+# w/ some ECDF estimates added:
+leg_colors=c(leg_colors_all[leg_which], '#CCCCCC'); leg_names=c(leg_names_all[leg_which], expression(paste('Local pFDR (', pi[0] == 1,'), ECDF est.'))); leg_lines=c(leg_lines_all_edit[leg_which], 1)
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+}
+```
+
+
+```{r}
+# ......................................... # // End SNP.
+```
+
+
+## Estimator 3: Empirical Null Estimate 
+
+```{r}
+library(locfdr)
+```
+
+
+```{r Empirical Null FDR fig settings}
+
+pFDR_2s_ylab = "Two-Sided pFDR"
+pFDR_1su_ylab = "Upper-Tail pFDR"
+locFDR_ylab = "Local FDR"
+
+leg_lines_all = c(1,1,1,1,1,1,1,1,1,1,1,2,1,2)
+
+## same color scheme as before:
+names(leg_colors_all) = 
+  names(leg_lines_all) = 
+  c('true_pFDR', 'pFDR_cm', 'pFDR_cm_unb', 'pFDR_ml', 'pFDR_ml_unb', 'qvalue_cm', 'qvalue_cm_unb', 'qvalue_ml', 'qvalue_ml_unb', 'true_locpFDR', 'locpFDR_cm', 'locpFDR_cm_unb', 'locpFDR_ml', 'locpFDR_ml_unb')
+
+leg_colors_all_ENull = leg_colors_all
+## option to change colors:
+# leg_colors_all_ENull = c('true_pFDR' = 'black',
+#   'pFDR_cm' = 'blue',
+#   'pFDR_cm_unb' = lighten('blue', 0.6),
+#   'pFDR_ml' = 'purple',
+#   'pFDR_ml_unb' = lighten('purple', 0.6),
+#   'qvalue_cm' = 'green',
+#   'qvalue_cm_unb' = lighten('green', 0.6),
+#   'qvalue_ml' = 'orange',
+#   'qvalue_ml_unb' = lighten('orange', 0.6),
+#   'true_locpFDR' = 'black',
+#   'locpFDR_cm' = 'blue',
+#   'locpFDR_cm_unb' = lighten('blue', 0.6),
+#   'locpFDR_ml' = 'purple',
+#   'locpFDR_ml_unb' = lighten('purple', 0.6))
+
+
+leg_names_all_ENull = c('True pFDR',  
+                        expression(paste('pFDR (CM)')),
+                        expression(paste('pFDR (CM), unbounded')),
+                        expression(paste('pFDR (MLE)')),  
+                        expression(paste('pFDR (MLE), unbounded')),
+                        expression(paste('q-value (CM)')),  
+                        expression(paste('q-value (CM), unbounded')), 
+                        expression(paste('q-value (MLE)')),  
+                        expression(paste('q-value (MLE), unbounded')),
+                        'True Local FDR',
+                        expression(paste('Local FDR (CM)')),
+                        expression(paste('Local FDR (CM), unbounded')),
+                        expression(paste('Local FDR (MLE)')),  
+                        expression(paste('Local FDR (MLE), unbounded')))
+
+
+```
+
+### Underdispersed Simulation
+
+```{r Empirical Null estimate undspsim, results='hide'}
+
+
+K_linds_undspsim  
+J_linds_undspsim    
+
+K_enull_cm_undspsim = 100 
+df_enull_cm_undspsim = 7  
+
+
+
+est_undspsim = locfdr(zz=z_undspsim, 
+                      bre=round(seq(min(z_undspsim)-0.01, max(z_undspsim)+0.01, length=K_enull_cm_undspsim),2),
+                      pct0=0.25,
+                      nulltype=1, #nulltype=2,
+                      
+                      df=df_enull_cm_undspsim, 
+                      # type=0,
+                      # pct=0,
+                      
+                      plot=0)
+
+
+pi0_undspsim_ENull_cm = est_undspsim$fp0[paste0('cm','est'),'p0']
+delta_undspsim_ENull_cm = est_undspsim$fp0[paste0('cm','est'),'delta']
+sigma_undspsim_ENull_cm = est_undspsim$fp0[paste0('cm','est'),'sigma']
+
+pi0_undspsim_ENull_cm; delta_undspsim_ENull_cm; sigma_undspsim_ENull_cm
+
+pi0_undspsim_ENull_ml = est_undspsim$fp0[paste0('ml','est'),'p0']
+delta_undspsim_ENull_ml = est_undspsim$fp0[paste0('ml','est'),'delta']
+sigma_undspsim_ENull_ml = est_undspsim$fp0[paste0('ml','est'),'sigma']
+
+pi0_undspsim_ENull_ml; delta_undspsim_ENull_ml; sigma_undspsim_ENull_ml
+
+```
+
+Supplemental Figure 7(a)
+
+```{r Figure 14a undspsim, fig.width=5.625, fig.height=5}
+# ~~~~> Figure 14(a) ##
+## ~~~~> Empirical Null Histogram & Density [Undsp.Sim.]
+if(save_figs == TRUE) {
+  fn="Fig14a_undspsim"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ......................................................................
+par(cex=1*mult)
+h = hist(z_undspsim, breaks=seq(min(z_undspsim)-0.01, max(z_undspsim)+0.01, length=K_enull_cm_undspsim), plot=F, freq=T)
+scale = m_undspsim*mean(sapply(2:length(h$breaks), function(i) h$breaks[i]-h$breaks[i-1]))
+
+
+plot(h, main="Simulation", xlab='Z', ylab='Density', freq=FALSE)
+# lines(z_undspsim, yhat_undspsim, lty=1, lwd=2, col='blue')
+lines(z_undspsim, 0.9*dnorm(z_undspsim, 0, 1), lty=1, lwd=2, col='red')
+lines(z_undspsim, 0.9*dnorm(z_undspsim, 0, 0.9), lty=1, lwd=2, col='black')
+# lines(z_undspsim, est_undspsim$fp0['cmest','p0']*dnorm(z_undspsim, 0, 0.9), lty=1, lwd=2, col='brown')
+# lines(z_undspsim, est_undspsim$fp0['mlest','p0']*dnorm(z_undspsim, 0, 0.9), lty=1, lwd=2, col='brown')
+lines(z_undspsim, est_undspsim$fp0['cmest','p0']*dnorm(z_undspsim, est_undspsim$fp0['cmest','delta'], est_undspsim$fp0['cmest','sigma']), lty=1, lwd=2, col='blue')
+lines(z_undspsim, est_undspsim$fp0['mlest','p0']*dnorm(z_undspsim, est_undspsim$fp0['mlest','delta'], est_undspsim$fp0['mlest','sigma']), lty=1, lwd=2, col='purple')
+
+if(save_figs==TRUE & add_leg==TRUE) {
+legend(1.2, max(h$density)+0.02,
+       legend = 
+         c(expression(paste('True null N(0, 0.9), ',pi[0],'=0.9')),
+           expression(paste('Theoretical null N(0, 1), ',pi[0],'=0.9')),
+           expression(paste('CM emp. null N(0.04, 0.86), ',pi[0],'=0.93')),
+           expression(paste('ML emp. null N(0.03, 0.9), ',pi[0],'=0.95'))),
+       col=c('black', 'red','blue','purple'), lty=c(1,1,1,1), lwd=c(1,1,1,1)*mult^2, bty='n', cex=1/mult/0.95, y.intersp=1)
+}
+par(cex=1)
+#### 
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+
+pFDR & q-value
+
+```{r Empirical Null undspsim pFDR qval 2s, cache=TRUE}
+
+# .............................................................................
+#### ~~> Emp. Null | Undsp.Sim. | pFDR & q-value | 2-Sided Rejection Region ##
+# .............................................................................
+
+F0_undspsim_empirical_cm_2s = pnorm(-abs(z_undspsim), delta_undspsim_ENull_cm, sigma_undspsim_ENull_cm)+(1-pnorm(abs(z_undspsim), delta_undspsim_ENull_cm, sigma_undspsim_ENull_cm))
+F0_undspsim_empirical_ml_2s = pnorm(-abs(z_undspsim), delta_undspsim_ENull_ml, sigma_undspsim_ENull_ml)+(1-pnorm(abs(z_undspsim), delta_undspsim_ENull_ml, sigma_undspsim_ENull_ml))
+
+# Fhat_undspsim_lindseys_2s 
+
+
+#### pFDR Estimate, using pi0 and empirical null estimated from CM or ML method
+pFDR_undspsim_ENull_cm_2s_unbounded = pi0_undspsim_ENull_cm*F0_undspsim_empirical_cm_2s/Fhat_undspsim_lindseys_2s
+pFDR_undspsim_ENull_cm_2s = pmin(1, pFDR_undspsim_ENull_cm_2s_unbounded)
+
+pFDR_undspsim_ENull_ml_2s_unbounded = pi0_undspsim_ENull_ml*F0_undspsim_empirical_ml_2s/Fhat_undspsim_lindseys_2s
+pFDR_undspsim_ENull_ml_2s = pmin(1, pFDR_undspsim_ENull_ml_2s_unbounded)
+
+
+
+#### q-value Estimate, using pi0 and empirical null estimated from CM or ML method
+qval_undspsim_ENull_cm_2s_unbounded = qval_fun(z=z_undspsim, pFDR=pFDR_undspsim_ENull_cm_2s_unbounded, type='2s')
+qval_undspsim_ENull_cm_2s = pmin(1, qval_undspsim_ENull_cm_2s_unbounded)
+
+qval_undspsim_ENull_ml_2s_unbounded = qval_fun(z=z_undspsim, pFDR=pFDR_undspsim_ENull_ml_2s_unbounded, type='2s')
+qval_undspsim_ENull_ml_2s = pmin(1, qval_undspsim_ENull_ml_2s_unbounded)
+
+```
+
+Figure 6(a)
+
+```{r Figure 15a undspsim 2s, fig.width=5.625, fig.height=5}
+## ~~~~> Figure 15(a) ##
+## ~~~~> pfdr & qval [Undsp.Sim., 2s]
+if(save_figs == TRUE) {
+  fn="Fig15a_2s_undspsim"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+  } else{mult=1}
+# ......................................................................
+leg_colors_all = leg_colors_all_ENull
+leg_names_all = leg_names_all_ENull
+
+par(cex=1*mult) 
+yl = c(0, max(c(pFDR_undspsim_ENull_cm_2s_unbounded, pFDR_undspsim_ENull_ml_2s_unbounded, 1)))
+# yl = c(0, 1)
+xl = c(min(z_undspsim), max(z_undspsim))
+# ......................................................................
+plot(NULL, xlab='z-value', ylab=pFDR_2s_ylab, main='Empirical Null \n Simulation', xlim=xl, ylim=yl)
+
+# abline(h=1, lty=1, lwd=1.5, col='grey')
+# rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+
+which_zseq = which(zseq_undspsim >= min(z_undspsim) & zseq_undspsim <= max(z_undspsim))
+lines(zseq_undspsim[which_zseq], pFDR_2s_zseq_undspsim[which_zseq], lwd=2, col=leg_colors_all['true_pFDR'])
+
+# lines(z_undspsim, qval_undspsim_ENull_cm_2s_unbounded, lwd=3, lty=2, col=leg_colors_all['qvalue_cm_unb'])
+# lines(z_undspsim, qval_undspsim_ENull_cm_2s, lwd=3, col=leg_colors_all['qvalue_cm'])
+# lines(z_undspsim, qval_undspsim_ENull_ml_2s_unbounded, lty=2, lwd=3, col=leg_colors_all['qvalue_ml_unb'])
+# lines(z_undspsim, qval_undspsim_ENull_ml_2s, lwd=3, col=leg_colors_all['qvalue_ml'])
+
+# lines(z_undspsim, pFDR_undspsim_ENull_cm_2s_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_cm_unb'])
+lines(z_undspsim, pFDR_undspsim_ENull_cm_2s, lwd=1.5, col=leg_colors_all['pFDR_cm'])
+# lines(z_undspsim, pFDR_undspsim_ENull_ml_2s_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_ml_unb'])
+lines(z_undspsim, pFDR_undspsim_ENull_ml_2s, lwd=1.5, col=leg_colors_all['pFDR_ml'])
+
+abline(h=0.05, lty=2, lwd=1.5, col='black')
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_cm','pFDR_cm_unb','pFDR_ml','pFDR_ml_unb','qvalue_cm','qvalue_cm_unb','qvalue_ml','qvalue_ml_unb'));   xpos=2.1; ypos=yl[2]+0.07; y.intersp=0.3
+## w/out q-values
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_cm','pFDR_cm_unb','pFDR_ml','pFDR_ml_unb'));   xpos=2.1; ypos=yl[2]+0.07; y.intersp=0.35
+## w/out q-values and unbounded ests:
+leg_which = which(names(leg_colors_all) %in% c('true_pFDR','pFDR_cm','pFDR_ml')); xpos=xl[2]-2.5; ypos=yl[2]; y.intersp=1
+## q-values only:
+# leg_which = which(names(leg_colors_all) %in% c('true_pFDR','qvalue_1','qvalue_1_unb','qvalue_0.9','qvalue_0.9_unb'));   xpos=2.1; ypos=yl[2]+0.07; y.intersp=0.35
+
+leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all[leg_which]
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+```
+
+Local FDR
+
+```{r Empirical Null undspsim local, cache=TRUE}
+
+# ................................................
+####### ~~> Emp. Null | Undsp.Sim. | Local FDR ##
+# ................................................
+
+f0_undspsim_empirical_cm = dnorm(z_undspsim, delta_undspsim_ENull_cm, sigma_undspsim_ENull_cm)
+f0_undspsim_empirical_ml = dnorm(z_undspsim, delta_undspsim_ENull_ml, sigma_undspsim_ENull_ml)
+
+# fhat_undspsim_lindseys 
+
+
+#### Local pFDR Estimate, using pi0 and empirical null estimated from CM or ML method
+locpFDR_undspsim_ENull_cm_unbounded = pi0_undspsim_ENull_cm*f0_undspsim_empirical_cm/fhat_undspsim_lindseys
+locpFDR_undspsim_ENull_cm = pmin(1, locpFDR_undspsim_ENull_cm_unbounded)
+
+locpFDR_undspsim_ENull_ml_unbounded = pi0_undspsim_ENull_ml*f0_undspsim_empirical_ml/fhat_undspsim_lindseys
+locpFDR_undspsim_ENull_ml = pmin(1, locpFDR_undspsim_ENull_ml_unbounded)
+
+```
+
+Figure 6(c)
+
+```{r Figure 15c undspsim local, fig.width=5.625, fig.height=5}
+## ~~~~> Figure 15(c) ##
+## ~~~~> loc. pfdr [Undsp.Sim.] 
+if(save_figs == TRUE) {
+  fn="Fig15c_local_undspsim"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_colors_all = leg_colors_all_ENull
+leg_names_all = leg_names_all_ENull
+
+leg_lines_all_edit = leg_lines_all
+leg_lines_all_edit[which(names(leg_colors_all) %in% c('locpFDR_cm_unb', 'locpFDR_ml_unb'))] = 1
+
+
+par(cex=1*mult)
+## Plot with all quantities
+yl = c(0, max(c(locpFDR_undspsim_ENull_cm_unbounded, locpFDR_undspsim_ENull_ml_unbounded)))
+# yl = c(0, max(c(locpFDR_undspsim_ENull_cm_unbounded, locpFDR_undspsim_ENull_ml_unbounded, locpFDR_undspsim_lindseys_pr1_unbounded, locpFDR_undspsim_lindseys_pr0.9_unbounded)))
+# yl = c(0, 5)
+xl = c(min(z_undspsim), max(z_undspsim))
+# ...................................................................... 
+plot(NULL, xlab='z-value', ylab=locFDR_ylab, main='Empirical Null \n Simulation', xlim=xl, ylim=yl)
+
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+
+which_zseq = which(zseq_undspsim >= min(z_undspsim) & zseq_undspsim <= max(z_undspsim))
+lines(zseq_undspsim[which_zseq], pFDR_loc_approx_zseq_undspsim[which_zseq], lwd=2, col=leg_colors_all['true_locpFDR'])
+# lines(zseq_undspsim[which_zseq], pFDR_loc_zseq_undspsim[which_zseq], lwd=2, col=leg_colors_all['true_locpFDR'])
+
+# lines(z_undspsim, locpFDR_undspsim_lindseys_pr1_unbounded, lty=1, lwd=1, col='grey')
+# lines(z_undspsim, locpFDR_undspsim_lindseys_pr1, lty=1, lwd=1, col='pink')
+
+lines(z_undspsim, locpFDR_undspsim_ENull_cm_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_cm_unb'])
+lines(z_undspsim, locpFDR_undspsim_ENull_cm, lwd=2, col=leg_colors_all['locpFDR_cm'])
+lines(z_undspsim, locpFDR_undspsim_ENull_ml_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_ml_unb'])
+lines(z_undspsim, locpFDR_undspsim_ENull_ml, lwd=2, col=leg_colors_all['locpFDR_ml'])
+
+abline(h=0.05, lty=2, lwd=1.5)
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+leg_which = which(names(leg_colors_all) %in% c('true_locpFDR','locpFDR_cm','locpFDR_cm_unb','locpFDR_ml','locpFDR_ml_unb')); xpos=xl[1]; ypos=0.37; y.intersp=1
+## w/out unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('true_locpFDR','locpFDR_cm','locpFDR_ml'));   xpos=2.8; ypos=yl[2]+0.07; y.intersp=0.4
+
+leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all_edit[leg_which]
+# w/ some ECDF estimates added:
+# leg_colors=c(leg_colors_all[leg_which], 'grey', 'pink'); leg_names=c(leg_names_all[leg_which], expression(paste('pFDR (', pi[0] == 1,'), Theoretical null est.')), expression(paste("pFDR (", pi[0] == 0.9,'), Theoretical null est.'))); leg_lines=c(leg_lines_all_edit[leg_which], 1, 1)
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+```
+
+```{r}
+# ......................................... # // End Underdisp. Sim.
+```
+
+
+### Real World Example:
+
+
+
+```{r Empirical Null estimate snp, results='hide', dependson=c("snp opts")}
+if(run_snp_ex==TRUE) {
+
+K_enull_cm_snp = 100 
+df_enull_cm_snp = 7 
+
+est_snp = locfdr(zz=z_snp, 
+                 bre=round(seq(min(z_snp)-0.01, max(z_snp)+0.01, length=K_enull_cm_snp),2),
+                 pct0=0.25,
+                 nulltype=1, #nulltype=2,
+                 
+                 df=df_enull_cm_snp, 
+                 # type=0,
+                 # pct=0,
+                 
+                 plot=0)
+
+
+pi0_snp_ENull_cm = est_snp$fp0[paste0('cm','est'),'p0']
+delta_snp_ENull_cm = est_snp$fp0[paste0('cm','est'),'delta']
+sigma_snp_ENull_cm = est_snp$fp0[paste0('cm','est'),'sigma']
+
+pi0_snp_ENull_cm; delta_snp_ENull_cm; sigma_snp_ENull_cm
+
+pi0_snp_ENull_ml = est_snp$fp0[paste0('ml','est'),'p0']
+delta_snp_ENull_ml = est_snp$fp0[paste0('ml','est'),'delta']
+sigma_snp_ENull_ml = est_snp$fp0[paste0('ml','est'),'sigma']
+
+pi0_snp_ENull_ml; delta_snp_ENull_ml; sigma_snp_ENull_ml
+
+}
+```
+
+Supplemental Figure 7(b) 
+
+```{r Figure 14b snp, fig.width=5.625, fig.height=5}
+if(run_snp_ex==TRUE) {
+# ~~~~> Figure 14(b) ##
+## ~~~~> Empirical Null Histogram & Density [SNP]
+if(save_figs == TRUE) {
+  fn="Fig14b_snp"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ......................................................................
+par(cex=1*mult)
+h = hist(z_snp, breaks=seq(min(z_snp)-0.01, max(z_snp)+0.01, length=K_enull_cm_snp), plot=F, freq=T)
+scale = m_snp*mean(sapply(2:length(h$breaks), function(i) h$breaks[i]-h$breaks[i-1]))
+
+# freq: scale*[est]
+plot(h, main="SNP", xlab='Z', ylab='Density', freq=FALSE)
+# lines(z_snp, yhat_snp, lty=1, lwd=2, col='blue')
+# lines(z_snp, 0.85*dnorm(z_snp, 0, 1), lty=1, lwd=2, col='grey')
+lines(z_snp, 1*dnorm(z_snp, 0, 1), lty=1, lwd=2, col='black')
+# lines(z_snp, est_snp$fp0['cmest','p0']*dnorm(z_snp, 0, 1), lty=1, lwd=2, col='brown')
+# lines(z_snp, est_snp$fp0['mlest','p0']*dnorm(z_snp, 0, 1), lty=1, lwd=2, col='brown')
+lines(z_snp, est_snp$fp0['cmest','p0']*dnorm(z_snp, est_snp$fp0['cmest','delta'], est_snp$fp0['cmest','sigma']), lty=1, lwd=2, col='blue')
+lines(z_snp, est_snp$fp0['mlest','p0']*dnorm(z_snp, est_snp$fp0['mlest','delta'], est_snp$fp0['mlest','sigma']), lty=1, lwd=2, col='purple')
+
+if(save_figs==TRUE & add_leg==TRUE) {
+legend('topright',
+       legend = 
+         c(expression(paste('Theoretical null N(0, 1), ',pi[0],'=1')),
+           expression(paste('CM emp. null N(-0.04, 0.98), ',pi[0],'=0.99')),
+           expression(paste('ML emp. null N(-0.015, 0.91), ',pi[0],'=0.93'))), 
+       col=c('black', 
+             # 'grey',
+             'blue','purple'), lty=c(1,1,1), lwd=c(1,1,1)*mult^2, bty='n', y.intersp=1, cex=1/mult/0.95)
+}
+par(cex=1)
+#### 
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+}
+```
+
+
+pFDR & q-value
+
+```{r Empirical Null snp pFDR qval 2s, dependson=c("snp opts")}
+if(run_snp_ex==TRUE) {
+
+# .............................................................................
+#### ~~> Emp. Null | SNP | pFDR & q-value | 2-Sided Rejection Region ##
+# .............................................................................
+
+F0_snp_empirical_cm_2s = pnorm(-abs(z_snp), delta_snp_ENull_cm, sigma_snp_ENull_cm)+(1-pnorm(abs(z_snp), delta_snp_ENull_cm, sigma_snp_ENull_cm))
+F0_snp_empirical_ml_2s = pnorm(-abs(z_snp), delta_snp_ENull_ml, sigma_snp_ENull_ml)+(1-pnorm(abs(z_snp), delta_snp_ENull_ml, sigma_snp_ENull_ml))
+
+# Fhat_snp_lindseys_2s 
+
+
+#### pFDR Estimate, using pi0 and empirical null estimated from CM or ML method
+pFDR_snp_ENull_cm_2s_unbounded = pi0_snp_ENull_cm*F0_snp_empirical_cm_2s/Fhat_snp_lindseys_2s
+pFDR_snp_ENull_cm_2s = pmin(1, pFDR_snp_ENull_cm_2s_unbounded)
+
+pFDR_snp_ENull_ml_2s_unbounded = pi0_snp_ENull_ml*F0_snp_empirical_ml_2s/Fhat_snp_lindseys_2s
+pFDR_snp_ENull_ml_2s = pmin(1, pFDR_snp_ENull_ml_2s_unbounded)
+
+
+
+#### q-value Estimate, using pi0 and empirical null estimated from CM or ML method
+# qval_snp_ENull_cm_2s_unbounded = qval_fun(z=z_snp, pFDR=pFDR_snp_ENull_cm_2s_unbounded, type='2s')
+# qval_snp_ENull_cm_2s = pmin(1, qval_snp_ENull_cm_2s_unbounded)
+# 
+# qval_snp_ENull_ml_2s_unbounded = qval_fun(z=z_snp, pFDR=pFDR_snp_ENull_ml_2s_unbounded, type='2s')
+# qval_snp_ENull_ml_2s = pmin(1, qval_snp_ENull_ml_2s_unbounded)
+
+}
+```
+
+Figure 6(b)
+
+```{r Figure 15b snp 2s, fig.width=5.625, fig.height=5}
+if(run_snp_ex==TRUE) {
+## ~~~~> Figure 15(b) ##
+## ~~~~> pfdr & qval [SNP, 2s] 
+if(save_figs == TRUE) {
+  fn="Fig15b_2s_snp"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ......................................................................
+leg_colors_all = leg_colors_all_ENull
+leg_names_all = leg_names_all_ENull
+
+par(cex=1*mult) 
+yl = c(0, max(c(pFDR_snp_ENull_cm_2s_unbounded, pFDR_snp_ENull_ml_2s_unbounded, 1)))
+# yl = c(0, 1)
+xl = c(min(z_snp), max(z_snp))
+# ......................................................................
+plot(NULL, xlab='z-value', ylab=pFDR_2s_ylab, main='Empirical Null \n SNP', xlim=xl, ylim=yl)
+
+# abline(h=1, lty=1, lwd=1.5, col='grey')
+# rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+
+# lines(z_snp, qval_snp_ENull_cm_2s_unbounded, lwd=3, lty=2, col=leg_colors_all['qvalue_cm_unb'])
+# lines(z_snp, qval_snp_ENull_cm_2s, lwd=3, col=leg_colors_all['qvalue_cm'])
+# lines(z_snp, qval_snp_ENull_ml_2s_unbounded, lty=2, lwd=3, col=leg_colors_all['qvalue_ml_unb'])
+# lines(z_snp, qval_snp_ENull_ml_2s, lwd=3, col=leg_colors_all['qvalue_ml'])
+
+# lines(z_snp, pFDR_snp_ENull_cm_2s_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_cm_unb'])
+lines(z_snp, pFDR_snp_ENull_cm_2s, lwd=2, col=leg_colors_all['pFDR_cm'])
+# lines(z_snp, pFDR_snp_ENull_ml_2s_unbounded, lty=2, lwd=1.5, col=leg_colors_all['pFDR_ml_unb'])
+lines(z_snp, pFDR_snp_ENull_ml_2s, lwd=2, col=leg_colors_all['pFDR_ml'])
+
+abline(h=0.05, lty=2, lwd=1.5, col='black')
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+# leg_which = which(names(leg_colors_all) %in% c('pFDR_cm','pFDR_cm_unb','pFDR_ml','pFDR_ml_unb','qvalue_cm','qvalue_cm_unb','qvalue_ml','qvalue_ml_unb'));   xpos=2.1; ypos=yl[2]+0.07; y.intersp=0.3
+## w/out q-values
+# leg_which = which(names(leg_colors_all) %in% c('pFDR_cm','pFDR_cm_unb','pFDR_ml','pFDR_ml_unb')); xpos=xl[2]-3.7; ypos=yl[2]; y.intersp=1
+## w/out q-values and unbounded ests:
+leg_which = which(names(leg_colors_all) %in% c('pFDR_cm','pFDR_ml'));   xpos=xl[2]-2.9; ypos=yl[2]; y.intersp=1
+## q-values only:
+# leg_which = which(names(leg_colors_all) %in% c('qvalue_1','qvalue_1_unb','qvalue_0.85','qvalue_0.85_unb'));   xpos=2.1; ypos=yl[2]+0.07; y.intersp=0.35
+
+leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all[leg_which]
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')  
+}
+par(cex=1)
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+}
+```
+
+
+Local FDR
+
+```{r Empirical Null snp local, dependson=c("snp opts")}
+if(run_snp_ex==TRUE) {
+# ................................................
+####### ~~> Emp. Null | SNP | Local FDR ##
+# ................................................
+
+f0_snp_empirical_cm = dnorm(z_snp, delta_snp_ENull_cm, sigma_snp_ENull_cm)
+f0_snp_empirical_ml = dnorm(z_snp, delta_snp_ENull_ml, sigma_snp_ENull_ml)
+
+# fhat_snp_lindseys 
+
+
+#### Local pFDR Estimate, using pi0 and empirical null estimated from CM or ML method
+locpFDR_snp_ENull_cm_unbounded = pi0_snp_ENull_cm*f0_snp_empirical_cm/fhat_snp_lindseys
+locpFDR_snp_ENull_cm = pmin(1, locpFDR_snp_ENull_cm_unbounded)
+
+locpFDR_snp_ENull_ml_unbounded = pi0_snp_ENull_ml*f0_snp_empirical_ml/fhat_snp_lindseys
+locpFDR_snp_ENull_ml = pmin(1, locpFDR_snp_ENull_ml_unbounded)
+
+}
+```
+
+Figure 6(d)
+
+```{r Figure 15d snp local, fig.width=5.625, fig.height=5}
+if(run_snp_ex==TRUE) {
+## ~~~~> Figure 15(d) ##
+## ~~~~> loc. fdr [SNP] 
+if(save_figs == TRUE) {
+  fn="Fig15d_local_snp"
+  if(add_leg==FALSE) {fn=paste(fn,"_noleg",sep="")}
+  png(filename = file.path(project.folder, paste("Figures/", fn,".png",sep="")), width=225, height=200, units='mm', res=250)
+  mult=1.5
+} else{mult=1}
+# ...................................................................... 
+leg_colors_all = leg_colors_all_ENull
+leg_names_all = leg_names_all_ENull
+
+
+leg_lines_all_edit = leg_lines_all
+leg_lines_all_edit[which(names(leg_colors_all) %in% c('locpFDR_ml_unb'))] = 1
+
+
+par(cex=1*mult)
+## Plot with all quantities
+yl = c(0, max(c(locpFDR_snp_ENull_cm_unbounded, locpFDR_snp_ENull_ml_unbounded)))
+# yl = c(0, max(c(locpFDR_snp_ENull_cm_unbounded, locpFDR_snp_ENull_ml_unbounded, locpFDR_snp_lindseys_pr1_unbounded, locpFDR_snp_lindseys_pr1_unbounded)))
+# yl = c(0, 1)
+xl = c(min(z_snp), max(z_snp))
+# ...................................................................... 
+plot(NULL, xlab='z-value', ylab=locFDR_ylab, main='Empirical Null \n SNP', xlim=xl, ylim=yl)
+
+abline(h=1, lty=1, lwd=1.5, col='grey')
+rect(min(xl)-1, 1, max(xl)+1, max(yl)+1, density = NULL, angle = 45, col = rgb(0,0,0,0.05), border = NA)
+
+# lines(z_snp, locpFDR_snp_lindseys_pr1_unbounded, lty=1, lwd=1, col='grey')
+# lines(z_snp, locpFDR_snp_lindseys_pr1, lty=1, lwd=1, col='pink')
+
+# lines(z_snp, locpFDR_snp_ENull_cm_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_cm_unb'])
+lines(z_snp, locpFDR_snp_ENull_cm, lwd=2, col=leg_colors_all['locpFDR_cm'])
+lines(z_snp, locpFDR_snp_ENull_ml_unbounded, lwd=2, lty=2, col=leg_colors_all['locpFDR_ml_unb'])
+lines(z_snp, locpFDR_snp_ENull_ml, lwd=2, col=leg_colors_all['locpFDR_ml'])
+
+abline(h=0.05, lty=2, lwd=1.5)
+
+if(save_figs==TRUE & add_leg==TRUE) {
+# -> Legend
+## w/ all quantities:
+# leg_which = which(names(leg_colors_all) %in% c('locpFDR_cm','locpFDR_cm_unb','locpFDR_ml','locpFDR_ml_unb')); xpos=xl[2]-3.6; ypos=yl[2]; y.intersp=1
+leg_which = which(names(leg_colors_all) %in% c('locpFDR_cm','locpFDR_ml','locpFDR_ml_unb')); xpos=-2.3; ypos=0.28; y.intersp=1
+## w/out unbounded ests:
+# leg_which = which(names(leg_colors_all) %in% c('locpFDR_cm','locpFDR_ml'));   xpos=2.8; ypos=yl[2]+0.07; y.intersp=0.4
+
+leg_colors=leg_colors_all[leg_which]; leg_names=leg_names_all[leg_which]; leg_lines=leg_lines_all_edit[leg_which]
+# w/ some ECDF estimates added:
+# leg_colors=c(leg_colors_all[leg_which], 'grey', 'pink'); leg_names=c(leg_names_all[leg_which], expression(paste('pFDR (', pi[0] == 1,'), Theoretical null est.')), expression(paste("pFDR (", pi[0] == 0.85,'), Theoretical null est.'))); leg_lines=c(leg_lines_all_edit[leg_which], 1, 1)
+legend(xpos, ypos, legend=leg_names, col=leg_colors, lty=leg_lines,
+       y.intersp=y.intersp, lwd=2.5, cex=1/mult/0.95, bty='n')
+}
+# ...................................................................... 
+if(save_figs == TRUE) {dev.off()}
+
+}
+```
+
+
+```{r}
+# ......................................... # // End SNP
+```
+
+
+
+
+## Pi0 Estimates
+
+```{r}
+
+# install.packages("FDRestimation")
+library(FDRestimation)
+# devtools::install_github("jdstorey/qvalue")
+library(qvalue)
+
+```
+
+Simple Simulation: 
+
+```{r}
+
+## Efron
+print("Efron")
+alpha0 = 0.5
+A0 = qnorm(0.5+c(-1,1)*alpha0/2)
+pi0_Ef_sim = sum(z_sim >= A0[1] & z_sim <= A0[2])/m_sim/(pnorm(A0[2])-pnorm(A0[1]))
+pi0_Ef_sim
+
+## Last Histogram Height
+print("Last Histogram Height")
+pi0_HH_sim = FDRestimation::get.pi0(pvalues = dat_sim$p_2s, zvalues = "two.sided", estim.method = "last.hist")
+pi0_HH_sim
+
+# get.pi0(pvalues = dat_sim$p_1su, zvalues = "greater", estim.method = "last.hist")
+
+```
+
+```{r}
+
+## Storey & Tibshirani
+print("Storey & Tibshirani")
+pi0_ST03_sim = pi0est(dat_sim$p_2s)$pi0
+pi0_ST03_sim
+
+```
+
+Underdispersed Simulation: 
+
+```{r}
+
+## Efron
+print("Efron")
+alpha0 = 0.5
+A0 = qnorm(0.5+c(-1,1)*alpha0/2)
+pi0_Ef_undspsim = sum(z_undspsim >= A0[1] & z_undspsim <= A0[2])/m_undspsim/(pnorm(A0[2])-pnorm(A0[1]))
+pi0_Ef_undspsim = min(pi0_Ef_undspsim, 1)
+pi0_Ef_undspsim
+
+## Last Histogram Height
+print("Last Histogram Height")
+pi0_HH_undspsim = FDRestimation::get.pi0(pvalues = dat_undspsim$p_2s, zvalues = "two.sided", estim.method = "last.hist")
+pi0_HH_undspsim
+
+
+```
+
+```{r}
+
+## Storey & Tibshirani
+print("Storey & Tibshirani")
+pi0_ST03_undspsim = pi0est(dat_undspsim$p_2s)$pi0
+pi0_ST03_undspsim
+
+
+```
+
+Real World Example: 
+
+```{r}
+if(run_snp_ex==TRUE) {
+## Efron
+print("Efron")
+alpha0 = 0.5
+A0 = qnorm(0.5+c(-1,1)*alpha0/2)
+pi0_Ef_snp = sum(z_snp >= A0[1] & z_snp <= A0[2])/m_snp/(pnorm(A0[2])-pnorm(A0[1]))
+print(pi0_Ef_snp)
+
+## Last Histogram Height
+print("Last Histogram Height")
+pi0_HH_snp = FDRestimation::get.pi0(pvalues = dat_snp$p_2s, zvalues = "two.sided", estim.method = "last.hist")
+print(pi0_HH_snp)
+
+
+}
+```
+
+```{r}
+if(run_snp_ex==TRUE) {
+
+## Storey & Tibshirani
+print("Storey & Tibshirani")
+pi0_ST03_snp = pi0est(dat_snp$p_2s)$pi0
+print(pi0_ST03_snp)
+
+
+}
+```
+
+
+
+
+
+
+
+
